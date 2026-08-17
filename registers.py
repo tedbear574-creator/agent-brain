@@ -1280,18 +1280,32 @@ class _RegisterServer(http.server.ThreadingHTTPServer):
     token: str
     writer: str
     allowed_origins: set
+    # The watchdog reads the wall clock through server.clock and its idle
+    # window through server.idle_limit, so a test can inject a fake clock and
+    # step idle/alive transitions with no real sleeps. See make_server.
+    clock: "callable"
+    idle_limit: float
+    idle_poll: float
+    last_seen: float
 
 
-def make_server(root: str) -> _RegisterServer:
+def make_server(root: str, clock=time.monotonic) -> _RegisterServer:
     """Build (but don't start) the local register server on a free port. A
     fresh random token is minted for this run; the page carries it and every
-    action request must present it."""
+    action request must present it.
+
+    `clock` is the monotonic-seconds source the whole idle machinery reads —
+    the default is real time; a test passes a controllable fake so it can move
+    time by hand and assert the exact idle/alive transitions without sleeping.
+    """
     server = _RegisterServer(("127.0.0.1", 0), _RegisterHandler)
     server.root = root
     server.token = secrets.token_urlsafe(24)
     server.writer = writer_id()
+    server.clock = clock
     server.idle_limit = float(os.environ.get("REGISTERS_SERVE_IDLE", "15"))
-    server.last_seen = time.monotonic() + float(
+    server.idle_poll = float(os.environ.get("REGISTERS_SERVE_POLL", "0.25"))
+    server.last_seen = server.clock() + float(
         os.environ.get("REGISTERS_SERVE_GRACE", "45"))
     port = server.server_address[1]
     server.allowed_origins = {
@@ -1351,7 +1365,7 @@ class _RegisterHandler(http.server.BaseHTTPRequestHandler):
                                  "access code. Open the register from its own "
                                  "window."}, 403)
             return False
-        self.server.last_seen = time.monotonic()
+        self.server.last_seen = self.server.clock()
         return True
 
     def do_GET(self) -> None:
@@ -1398,7 +1412,7 @@ class _RegisterHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/goodbye":
             if not self._guard():
                 return
-            self.server.last_seen = (time.monotonic()
+            self.server.last_seen = (self.server.clock()
                                      - self.server.idle_limit + 3.0)
             self._json({"ok": True})
             return
@@ -1427,13 +1441,23 @@ class _RegisterHandler(http.server.BaseHTTPRequestHandler):
         self._json({"ok": True, "register": _register_payload(self.server.root)})
 
 
+def _watchdog_should_stop(server: _RegisterServer) -> bool:
+    """True once the page has gone quiet for longer than the idle window.
+
+    The lone place the idle rule lives — the running thread and any test both
+    ask this. It reads time through server.clock, so a fake clock drives the
+    idle/alive transitions exactly, with no sleeping.
+    """
+    return server.clock() - server.last_seen > server.idle_limit
+
+
 def start_idle_watchdog(server: _RegisterServer) -> threading.Thread:
     """Shut the server down once the page's heartbeats stop — closing the last
     browser tab is the off switch."""
     def watch():
         while True:
-            time.sleep(0.25)
-            if time.monotonic() - server.last_seen > server.idle_limit:
+            time.sleep(server.idle_poll)
+            if _watchdog_should_stop(server):
                 server.shutdown()
                 return
     t = threading.Thread(target=watch, daemon=True)
