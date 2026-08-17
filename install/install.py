@@ -14,13 +14,14 @@ rather than duplicated. Re-running is safe.
 
 Usage:
     python install/install.py [--root DIR] [--name NAME] [--no-git]
-                              [--settings PATH] [--print-only]
+                              [--settings PATH] [--print-only] [--print-mcp]
 
 --root       where the instance data lives (default: ./brain next to brain.py)
 --name       a human label for the deployment, stored in the config
 --no-git     create the data root without a git repo (folder-sync profile)
 --settings   the Claude Code settings.json to wire (default: ~/.claude/settings.json)
 --print-only don't touch settings.json — just print the hook snippet to paste
+--print-mcp  print the MCP-server config snippet with resolved paths, then exit
 """
 import argparse
 import json
@@ -32,6 +33,7 @@ from datetime import datetime, timezone
 
 PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BRAIN_PY = os.path.join(PACKAGE_DIR, "brain.py")
+BRAIN_MCP_PY = os.path.join(PACKAGE_DIR, "brain_mcp.py")
 HOOKS_DIR = os.path.join(PACKAGE_DIR, "hooks")
 CONFIG_PATH = os.path.join(PACKAGE_DIR, "brain.config.json")
 
@@ -144,6 +146,27 @@ def wire_settings(settings_path: str, print_only: bool) -> None:
     print(f"wired {len(HOOKS)} hooks into {settings_path}")
 
 
+def print_mcp(root: str) -> None:
+    """Print the MCP-server config with real resolved paths, for both the
+    desktop app's claude_desktop_config.json and the Claude Code CLI."""
+    py = (sys.executable or "python").replace("\\", "/")
+    mcp = BRAIN_MCP_PY.replace("\\", "/")
+    root_fwd = root.replace("\\", "/")
+    snippet = {
+        "mcpServers": {
+            "agent-brain": {
+                "command": py,
+                "args": [mcp, "--root", root_fwd],
+            }
+        }
+    }
+    print("\n--- MCP server: paste into claude_desktop_config.json ---")
+    print(json.dumps(snippet, indent=2))
+    print("--- end ---\n")
+    print("Claude Code, one command:")
+    print(f'  claude mcp add agent-brain -- "{py}" "{mcp}" --root "{root_fwd}"')
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Install an Agent Brain instance.")
     ap.add_argument("--root", default=os.path.join(PACKAGE_DIR, "brain"),
@@ -156,9 +179,14 @@ def main() -> int:
                     help="Claude Code settings.json to wire the hooks into")
     ap.add_argument("--print-only", dest="print_only", action="store_true",
                     help="print the hook snippet instead of editing settings.json")
+    ap.add_argument("--print-mcp", dest="print_mcp", action="store_true",
+                    help="print the MCP-server config snippet (resolved paths) and exit")
     args = ap.parse_args()
 
     root = os.path.abspath(os.path.expanduser(args.root))
+    if args.print_mcp:
+        print_mcp(root)
+        return 0
     run_init(root, args.no_git)
     write_config(root, args.name)
     wire_settings(args.settings, args.print_only)
