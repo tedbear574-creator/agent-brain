@@ -245,7 +245,7 @@ TOOLS = [
     {
         "name": "brain_note",
         "description": "Append one typed memory entry to a scope's stream. Types: "
-                       "decision, milestone, gotcha, invariant, question, papercut. "
+                       "decision, milestone, gotcha, dead-end, invariant, question, papercut. "
                        "The engine enforces caps, duplicate rejection, the routing "
                        "test, and the subsystem requirement; a rejected write returns "
                        "the engine's teaching error so you can correct and retry.",
@@ -545,6 +545,10 @@ def main(argv=None) -> int:
             continue
         rest.append(arg)
         i += 1
+    if rest:
+        print(f"error: unrecognized arguments: {' '.join(rest)} "
+              "(the server takes only --root DIR)", file=sys.stderr)
+        return 2
     # Pin the resolved root into the environment so every brain.py subprocess
     # resolves the same instance (the board tools carry their own --root).
     os.environ["BRAIN_ROOT"] = _resolve_root(cli_root)

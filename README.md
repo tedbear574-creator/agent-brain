@@ -83,7 +83,7 @@ timestamped backup). Use `--print-only` to get the snippet to paste yourself, or
 
 ## MCP server
 
-`brain_mcp.py` exposes the same three tools to any Model Context Protocol client
+`brain_mcp.py` exposes all three engine CLIs as tools to any Model Context Protocol client
 (a desktop chat app, an editor, another agent) — so a surface with no Claude Code
 hook layer still gets the engine's discipline. Every tool call shells out to the
 real CLI, so each caps check, duplicate rejection, routing test, and subsystem
