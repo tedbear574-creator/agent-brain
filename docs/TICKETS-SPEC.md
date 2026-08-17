@@ -47,10 +47,18 @@ three prefixes), never generic.
 carry its own short code (`open --prefix`, `edit --prefix`; blank reverts to
 the board's), stored on the event, uppercased for display. A board whose
 tickets all read the same prefix disambiguates nothing (user ruling
-2026-08-16). The **number stays board-wide** (propose_n = max-known+1 across
-all prefixes): the number is the ticket's spoken identity, so a re-label
-never renumbers, bare-`n` lookup stays unique, and old key references still
-resolve (the resolver matches on the number, ignoring a stale prefix).
+2026-08-16). **Each prefix numbers from 1 independently.** A ticket's
+effective prefix is its own when set, else the board's; `propose_n` at `open`
+= max number among live+closed tickets *sharing that effective prefix*, + 1.
+So the first ticket under a new code is `CODE-1` even on a board that already
+holds tickets under other codes. `edit --prefix` keeps the ticket's number
+when that number is free in the target code's space, otherwise the event
+carries the next free number there and the fold applies it (the CLI prints
+the resulting key either way). The permanent hex id never changes and is the
+reference that always resolves. Resolution: a full key `PREFIX-n` matches
+within that prefix's space; a bare `n` matches the board's own prefix first,
+then — if unique board-wide — any single ticket carrying it, and errors with
+the candidate keys when several prefixes share the number.
 
 ## Events
 
@@ -72,11 +80,16 @@ everything else), `comment` (text).
 ## Fold (deterministic — the board is computed, never stored)
 
 Replay all events from all writer files, ordered by `(ts, writer,
-line-number)`. Display number: honor `propose_n` (creator writes
-max-known+1); if two tickets proposed the same number, the later one (by
-replay order) keeps the number **with a letter suffix** (`5` and `5b`) —
-nothing is ever renumbered to a different number, so a clash between two
-tickets can never move a third. (Replaced "loser takes next free" after
+line-number)`. Display number: honor `propose_n` (creator writes the next
+free number in the ticket's effective-prefix space); if two tickets proposed
+the same number **under the same prefix**, the later one (by replay order)
+keeps the number **with a letter suffix** (`5` and `5b`) — nothing is ever
+renumbered to a different number, so a clash between two tickets can never
+move a third. The same number under two different prefixes is not a clash and
+takes no suffix. An old board numbered board-wide folds to identical keys:
+board-wide allocation left no `(prefix, n)` pair duplicated, so folding its
+events under the per-prefix rule yields exactly the same numbers (no
+migration, events are never rewritten). (Replaced "loser takes next free" after
 review: next-free assignment cascades when a late-syncing earlier-timestamp
 ticket arrives — its victim steals the next number, whose owner steals the
 next, and so on. Suffixes make the blast radius exactly the colliding

@@ -579,7 +579,8 @@ def test_full_lifecycle_smoke(tmp_path, monkeypatch, capsys):
 # per-ticket prefixes (multi-project boards)                                   #
 # --------------------------------------------------------------------------- #
 # On a board that tracks several projects, a ticket can carry its own short
-# code. The number underneath is board-wide, so a re-label never renumbers.
+# code. Each code numbers from 1 in its own space, so the first ticket under a
+# new code is CODE-1 even on a board already holding tickets under other codes.
 
 
 def test_open_with_prefix_override(tmp_path, monkeypatch):
@@ -587,7 +588,8 @@ def test_open_with_prefix_override(tmp_path, monkeypatch):
     run("open", "board-default ticket", "--root", root)
     run("open", "web-side ticket", "--root", root, "--prefix", "web")
     keys = set(_keys(root).values())
-    assert keys == {"ACME-DOC-1", "WEB-2"}
+    # WEB numbers from 1 in its own space — not board-wide 2.
+    assert keys == {"ACME-DOC-1", "WEB-1"}
 
 
 def test_edit_prefix_relabels_without_renumbering(tmp_path, monkeypatch):
@@ -612,6 +614,171 @@ def test_prefix_is_tidied_for_display(tmp_path, monkeypatch):
     root = make_board(tmp_path, monkeypatch)
     run("open", "messy code", "--root", root, "--prefix", "  gadget ")
     assert set(_keys(root).values()) == {"GADGET-1"}
+
+
+# --------------------------------------------------------------------------- #
+# per-prefix numbering                                                         #
+# --------------------------------------------------------------------------- #
+# Each effective prefix counts from 1 in its own space. The board's own prefix
+# and any per-ticket prefix are independent number lines; the same number under
+# two different prefixes is not a clash and takes no letter suffix.
+
+
+def test_each_prefix_counts_independently(tmp_path, monkeypatch):
+    root = make_board(tmp_path, monkeypatch)   # board prefix ACME-DOC
+    # Interleave the two spaces to prove the count is per-prefix, not order.
+    run("open", "acme one", "--root", root)                       # ACME-DOC-1
+    run("open", "web one", "--root", root, "--prefix", "web")     # WEB-1
+    run("open", "acme two", "--root", root)                       # ACME-DOC-2
+    run("open", "web two", "--root", root, "--prefix", "web")     # WEB-2
+    run("open", "web three", "--root", root, "--prefix", "web")   # WEB-3
+    run("open", "acme three", "--root", root)                     # ACME-DOC-3
+    keys = set(_keys(root).values())
+    assert keys == {"ACME-DOC-1", "ACME-DOC-2", "ACME-DOC-3",
+                    "WEB-1", "WEB-2", "WEB-3"}
+    # No letter suffix anywhere — the same number in two spaces is no clash.
+    assert not any(any(c.isalpha() for c in k.rsplit("-", 1)[1])
+                   for k in keys)
+
+
+def test_same_prefix_sync_clash_still_suffixes(tmp_path, monkeypatch):
+    """Two writers open into the SAME prefix offline, both proposing 5 — the
+    later one (by replay order) keeps the number with a letter: 5 and 5b."""
+    root = make_board(tmp_path, monkeypatch)
+    write_raw(root, "alice", [
+        {"ts": "2026-08-16T09:00:00", "writer": "alice", "verb": "open",
+         "id": "aaaaaaaa", "title": "alice five", "propose_n": 5,
+         "prefix": "WEB"},
+    ])
+    write_raw(root, "bob", [
+        {"ts": "2026-08-16T09:01:00", "writer": "bob", "verb": "open",
+         "id": "bbbbbbbb", "title": "bob five", "propose_n": 5,
+         "prefix": "WEB"},
+    ])
+    keys = _keys(root)
+    assert keys["aaaaaaaa"] == "WEB-5"
+    assert keys["bbbbbbbb"] == "WEB-5b"
+
+
+def test_same_number_two_prefixes_no_suffix(tmp_path, monkeypatch):
+    """The same proposed number under two DIFFERENT prefixes is not a clash."""
+    root = make_board(tmp_path, monkeypatch)
+    write_raw(root, "alice", [
+        {"ts": "2026-08-16T09:00:00", "writer": "alice", "verb": "open",
+         "id": "aaaaaaaa", "title": "web two", "propose_n": 2, "prefix": "WEB"},
+    ])
+    write_raw(root, "bob", [
+        {"ts": "2026-08-16T09:01:00", "writer": "bob", "verb": "open",
+         "id": "bbbbbbbb", "title": "side two", "propose_n": 2,
+         "prefix": "SIDE"},
+    ])
+    keys = _keys(root)
+    assert keys["aaaaaaaa"] == "WEB-2"    # both keep the plain number
+    assert keys["bbbbbbbb"] == "SIDE-2"
+
+
+def test_old_board_wide_log_folds_to_unchanged_keys(tmp_path, monkeypatch):
+    """Regression: a log written under the OLD board-wide rule (propose_n =
+    max-known+1 across every prefix) must fold to exactly the same keys under
+    the per-prefix rule. Events are never rewritten, and board-wide allocation
+    guarantees no (prefix, n) pair repeats, so the numbers are identical."""
+    root = make_board(tmp_path, monkeypatch)   # board prefix ACME-DOC
+    # A synthetic old-style board: numbers run 1..5 across all prefixes.
+    write_raw(root, "legacy", [
+        {"ts": "2026-08-16T09:00:00", "writer": "legacy", "verb": "open",
+         "id": "d0000001", "title": "board one", "propose_n": 1},
+        {"ts": "2026-08-16T09:01:00", "writer": "legacy", "verb": "open",
+         "id": "d0000002", "title": "web two", "propose_n": 2, "prefix": "WEB"},
+        {"ts": "2026-08-16T09:02:00", "writer": "legacy", "verb": "open",
+         "id": "d0000003", "title": "board three", "propose_n": 3},
+        {"ts": "2026-08-16T09:03:00", "writer": "legacy", "verb": "open",
+         "id": "d0000004", "title": "web four", "propose_n": 4,
+         "prefix": "WEB"},
+        {"ts": "2026-08-16T09:04:00", "writer": "legacy", "verb": "open",
+         "id": "d0000005", "title": "side five", "propose_n": 5,
+         "prefix": "SIDE"},
+    ])
+    keys = _keys(root)
+    # These are the exact keys the old board-wide code would have shown.
+    assert keys == {
+        "d0000001": "ACME-DOC-1",
+        "d0000002": "WEB-2",
+        "d0000003": "ACME-DOC-3",
+        "d0000004": "WEB-4",
+        "d0000005": "SIDE-5",
+    }
+
+
+def test_edit_prefix_keeps_number_when_free(tmp_path, monkeypatch, capsys):
+    root = make_board(tmp_path, monkeypatch)
+    run("open", "will move", "--root", root)       # ACME-DOC-1
+    run("open", "stays put", "--root", root)        # ACME-DOC-2
+    capsys.readouterr()
+    # WEB has no ticket 1, so the moved ticket keeps its number as WEB-1.
+    run("edit", "--root", root, "--ticket", "1", "--prefix", "web")
+    out = capsys.readouterr().out
+    assert "WEB-1" in out                           # the new key is printed
+    keys = set(_keys(root).values())
+    assert keys == {"WEB-1", "ACME-DOC-2"}
+
+
+def test_edit_prefix_renumbers_on_collision(tmp_path, monkeypatch, capsys):
+    root = make_board(tmp_path, monkeypatch)
+    run("open", "acme one", "--root", root)                     # ACME-DOC-1
+    run("open", "web one", "--root", root, "--prefix", "web")   # WEB-1
+    capsys.readouterr()
+    # Move ACME-DOC-1 into WEB, where 1 is taken — it takes the next free (2).
+    run("edit", "--root", root, "--ticket", "ACME-DOC-1", "--prefix", "web")
+    out = capsys.readouterr().out
+    assert "WEB-2" in out                           # the renumbered key printed
+    keys = set(_keys(root).values())
+    assert keys == {"WEB-1", "WEB-2"}
+    # The permanent id still resolves, and the number underneath moved cleanly.
+    tk = tickets.board_state(root)
+    moved = tickets.resolve_ticket(tk, "ACME-DOC", "WEB-2")
+    assert moved["title"] == "acme one"
+    assert moved["n"] == 2 and moved["nsfx"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# bare-number resolution across prefixes                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_bare_number_prefers_board_prefix(tmp_path, monkeypatch):
+    root = make_board(tmp_path, monkeypatch)   # board prefix ACME-DOC
+    run("open", "board one", "--root", root)                     # ACME-DOC-1
+    run("open", "web one", "--root", root, "--prefix", "web")    # WEB-1
+    tk = tickets.board_state(root)
+    # Both ACME-DOC-1 and WEB-1 exist; a bare "1" resolves to the board's own.
+    t = tickets.resolve_ticket(tk, "ACME-DOC", "1")
+    assert t["title"] == "board one"
+    assert tickets.key_of("ACME-DOC", t) == "ACME-DOC-1"
+
+
+def test_bare_number_unique_elsewhere_accepted(tmp_path, monkeypatch):
+    root = make_board(tmp_path, monkeypatch)   # board prefix ACME-DOC
+    # Only a WEB ticket carries number 2; the board's own space has none.
+    run("open", "board one", "--root", root)                     # ACME-DOC-1
+    run("open", "web one", "--root", root, "--prefix", "web")    # WEB-1
+    run("open", "web two", "--root", root, "--prefix", "web")    # WEB-2
+    tk = tickets.board_state(root)
+    t = tickets.resolve_ticket(tk, "ACME-DOC", "2")
+    assert t["title"] == "web two"
+
+
+def test_bare_number_ambiguous_dies_listing_candidates(tmp_path, monkeypatch):
+    root = make_board(tmp_path, monkeypatch)   # board prefix ACME-DOC
+    # Two different prefixes both carry number 1, and the board's own does not.
+    run("open", "web one", "--root", root, "--prefix", "web")    # WEB-1
+    run("open", "side one", "--root", root, "--prefix", "side")  # SIDE-1
+    tk = tickets.board_state(root)
+    # resolve_ticket raises TicketError (a SystemExit) carrying the message;
+    # both candidate keys are named so the caller can pick one.
+    with pytest.raises(SystemExit) as excinfo:
+        tickets.resolve_ticket(tk, "ACME-DOC", "1")
+    text = str(excinfo.value)
+    assert "WEB-1" in text and "SIDE-1" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -948,4 +1115,5 @@ def test_serve_edit_can_set_owner_and_prefix(tmp_path, monkeypatch):
     assert t["key"] == "SIDE-1"
     assert status2 == 200
     keys = {x["key"] for x in body2["board"]["active"]}
-    assert keys == {"SIDE-1", "OTHER-2"}
+    # OTHER numbers from 1 in its own space, independent of SIDE.
+    assert keys == {"SIDE-1", "OTHER-1"}
