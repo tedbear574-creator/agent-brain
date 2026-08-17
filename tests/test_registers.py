@@ -1179,11 +1179,70 @@ def test_serve_exits_when_heartbeats_stop(tmp_path, monkeypatch):
         server.server_close()
 
 
+class FakeClock:
+    """A hand-cranked monotonic clock: time only moves when a test advances it.
+
+    Injected via make_server(clock=...), it lets the idle-watchdog tests assert
+    the exact idle/alive transitions with no real sleeps — so a scheduler stall
+    under machine load can never turn a legitimate "still alive" into a
+    false failure (the flaw behind ticket AGENT-BRAIN-47)."""
+
+    def __init__(self, start=1000.0):
+        self._t = float(start)
+
+    def __call__(self):
+        return self._t
+
+    def advance(self, seconds):
+        self._t += float(seconds)
+
+
 def test_serve_heartbeats_keep_it_alive_and_goodbye_ends_it(tmp_path,
                                                             monkeypatch):
+    # Deterministic: a fake clock drives every idle/alive transition through
+    # the real server code paths (/api/ping sets last_seen, /api/goodbye arms
+    # the shutdown), with zero real sleeps.
+    root = make_reg(tmp_path, monkeypatch, writer="alice")
+    monkeypatch.setenv("REGISTERS_SERVE_IDLE", "10")
+    monkeypatch.setenv("REGISTERS_SERVE_GRACE", "0")
+    clock = FakeClock()
+    server = registers.make_server(root, clock=clock)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        # Heartbeats arriving well inside the 10s window keep it alive, no
+        # matter how much wall-clock passes between them — fake time only moves
+        # when we say so.
+        for _ in range(6):
+            clock.advance(4)   # 4s < the 10s idle window
+            status, _b = api(port, "GET", "/api/ping", server=server)
+            assert status == 200
+            assert not registers._watchdog_should_stop(server)
+        # A long silent stall would legitimately trip the watchdog...
+        clock.advance(11)
+        assert registers._watchdog_should_stop(server)
+        # ...and a fresh heartbeat revives it.
+        api(port, "GET", "/api/ping", server=server)
+        assert not registers._watchdog_should_stop(server)
+        # goodbye (closing the tab) arms a ~3s shutdown, whatever the window is.
+        api(port, "POST", f"/api/goodbye?token={server.token}", token=None)
+        assert not registers._watchdog_should_stop(server)   # not yet
+        clock.advance(3.1)
+        assert registers._watchdog_should_stop(server)       # now it stops
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_serve_watchdog_realtime_smoke(tmp_path, monkeypatch):
+    """One slow real-time pass so the actual watchdog thread and goodbye path
+    run end to end. Wide margins (5s idle, 0.5s heartbeats) keep it robust under
+    load; the fake-clock test above owns the precise idle/alive assertions."""
     import time as _time
     root = make_reg(tmp_path, monkeypatch, writer="alice")
-    monkeypatch.setenv("REGISTERS_SERVE_IDLE", "1")
+    monkeypatch.setenv("REGISTERS_SERVE_IDLE", "5")
     monkeypatch.setenv("REGISTERS_SERVE_GRACE", "0")
     server = registers.make_server(root)
     port = server.server_address[1]
@@ -1191,13 +1250,13 @@ def test_serve_heartbeats_keep_it_alive_and_goodbye_ends_it(tmp_path,
     thread.start()
     watchdog = registers.start_idle_watchdog(server)
     try:
-        for _ in range(6):
+        for _ in range(4):
             status, _b = api(port, "GET", "/api/ping", server=server)
             assert status == 200
-            _time.sleep(0.4)
+            _time.sleep(0.5)
         assert watchdog.is_alive()
         api(port, "POST", f"/api/goodbye?token={server.token}", token=None)
-        watchdog.join(timeout=10)
+        watchdog.join(timeout=15)
         assert not watchdog.is_alive()
     finally:
         server.server_close()
