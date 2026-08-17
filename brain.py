@@ -6,6 +6,13 @@ All paths below are relative to that root (plain text, git-backed, greppable):
   stream/<scope>.log         one entry per line:
                                          "ISO_TS | type | text"          or
                                          "ISO_TS | type | meta | text"   (meta: sup=7,9)
+  stream/<scope>/<writer>.log  a SHARED scope's per-writer spool (opt-in via
+                             `brain share`): the sibling <scope>.log is frozen
+                             legacy history, each writer appends only its own
+                             spool, and reads fold all of them deterministically
+                             by (ts, writer, seq). Spool ids are <writer>:<seq>;
+                             legacy ids stay numeric. Sync-folder safe. See
+                             docs/PROTOCOL.md "Shared scopes".
   tree/<scope>/root.md       topical "what is true now" state (generated)
   tree/<scope>/b<lo>-<hi>.md chrono branch summaries (generated)
   tree/<scope>/hazards.md    gotchas + dead ends, VERBATIM, grouped (generated)
@@ -41,6 +48,9 @@ Commands:
                                      never block, they COUNT, and recurrence prompts
                                      you to promote it to the board
   resolve --project X N "text"       retire hazard/papercut #N (milestone + sup=N)
+  share [--scope X]                  convert a scope to the multi-writer
+                                     (sync-folder) layout: freeze its log, route
+                                     new notes to a per-writer spool. One-way.
   papercuts [--scope X]              open papercuts clustered by recurrence
   dispatch ...                       RETIRED -> tracked work lives on the ticket
                                      board (tickets.py); the stub names the

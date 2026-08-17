@@ -1,4 +1,5 @@
 {
   "root": "./brain",
-  "name": "my-deployment"
+  "name": "my-deployment",
+  "writer": "this-machine"
 }
