@@ -256,10 +256,12 @@ def fold(events: list[dict], warnings: list | None = None,
     Vacated slots: when a ticket moves out of a slot it releases its spot, so
     the plain number becomes available again to a *later* mover in replay order
     (this is what lets a relabel-and-relabel-back land back on the plain
-    number). Within any single slot, at every point in the replay, no two
-    tickets share a key. Write-time number *allocation* for brand-new tickets
-    is separate and still only ever counts upward (``_next_number`` = one past
-    the highest live number in that space).
+    number). Closing a ticket does NOT release its slot — a closed ticket
+    keeps its key forever, so a later arrival at that number takes a suffix
+    rather than colliding with history. Within any single slot, at every point
+    in the replay, no two tickets share a key. Write-time number *allocation*
+    for brand-new tickets is separate and still only ever counts upward
+    (``_next_number`` = one past the highest live number in that space).
     """
     occupants: dict[tuple[str, int], dict[str, int]] = {}
     tickets: dict[str, dict] = {}
