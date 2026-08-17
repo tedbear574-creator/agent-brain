@@ -2,20 +2,29 @@
 """
 Stop hook: enforce the Agent Brain capture duty.
 
-Enforcement is narrow and deterministic — it fires only when the session
-actually changed project code, and on those sessions it requires a real brain
-write (not a throwaway token):
+Enforcement is deterministic and keyed to session SUBSTANCE, not to code alone —
+a document-only engagement (docx/xlsx/markdown) and a board-mutation-only
+session both carry the discipline, because the rulebook applies to every surface,
+not just the ones that touch code:
 
-  - If the session made NO project-code edit (read-only, Q&A, or edits confined
-    to the data root / the Claude Code config dir), the stop is allowed with no
-    obligation. Trivial sessions are not taxed.
+  - The gate FIRES when the session either (a) wrote or edited ANY project file —
+    code, docx, xlsx, md, anything OUTSIDE the instance's own data root and the
+    Claude Code config dir — OR (b) ran a mutating tickets/registers command (a
+    Bash/PowerShell tool call whose verb changes the board or a register).
 
-  - If the session DID edit project code, the first stop is blocked until either:
-      (a) a `brain note` (or `brain resolve`) was run this session — inline
-          capture, the normal path, OR
-      (b) a file inside the data root was written/edited this session (fixing a
-          pin, a reference doc — also real persistence).
-    A trivial change is still one line.
+  - It does NOT fire on: read-only / Q&A sessions, sessions whose only writes
+    landed inside the data root or its generated artifacts, or sessions that
+    already captured (a `brain note`/`brain resolve`) or attested.
+
+  - When it fires, the first stop is blocked until the session either (a) ran a
+    `brain note` (or `brain resolve`) — inline capture, the normal path, or (b)
+    wrote a file inside the data root (fixing a pin, a reference doc — also real
+    persistence). A trivial change is still one line.
+
+This is the hook half of a two-layer model: the engine accrues capture debt on
+every MCP surface (see brain_mcp.py) and the hooks gate Claude Code — the SAME
+capture-or-attest contract on both. The hook is an accelerator, not the
+mechanism.
 
 After the first satisfied stop, a per-session sentinel
 (brain-ack-<session_id> in the cache dir) allows subsequent stops without
@@ -35,11 +44,24 @@ from kb_card_inject import KB_ROOT, CACHE_DIR, BRAIN_CLI  # noqa: E402
 DATA_ROOT_MARKER = os.path.basename(os.path.normpath(KB_ROOT)) or "brain"
 DOTCLAUDE_MARKER = "/.claude/"
 WRITE_TOOLS = {"Write", "Edit", "NotebookEdit", "write", "edit"}
+SHELL_TOOLS = {"Bash", "PowerShell", "bash", "powershell"}
 
 # Inline capture is the protocol. `brain resolve` also counts — retiring a
-# hazard is capture too. Matches `brain note`, `brain.py note`, or a full path
-# to brain.py followed by note/resolve.
-BRAIN_NOTE_RE = re.compile(r"brain(?:\.py)?[\"']?\s+(note|resolve)\b", re.IGNORECASE)
+# hazard is capture too — and `brain attest` is the sanctioned "nothing to
+# capture" exit. Matches `brain note`, `brain.py note`, or a full path to
+# brain.py followed by note/resolve/attest.
+BRAIN_NOTE_RE = re.compile(r"brain(?:\.py)?[\"']?\s+(note|resolve|attest)\b",
+                           re.IGNORECASE)
+# The same capture verbs reached through the MCP server show up as tool_use
+# blocks whose name ends in brain_note / brain_resolve / brain_attest.
+CAPTURE_TOOL_SUFFIXES = ("brain_note", "brain_resolve", "brain_attest")
+# A session has substance if it ran a MUTATING board/register command. Verbs
+# that change stored data (not the read-only board/show/view/log/export/init).
+BOARD_MUTATION_RE = re.compile(
+    r"\b(?:tickets|registers)(?:\.py)?[\"']?\s+"
+    r"(?:open|claim|block|reopen|close|edit|update|comment|add|set|post|"
+    r"correct|retire|restore)\b",
+    re.IGNORECASE)
 # Session sentinels (brain-ack-*) are one-per-session and were never cleaned;
 # GC anything older than 7 days on each run.
 SENTINEL_MAX_AGE_S = 7 * 24 * 3600
@@ -119,33 +141,65 @@ def _iter_write_paths(transcript: list):
                 yield path.replace("\\", "/")
 
 
-def _check_project_code_changed(transcript: list) -> bool:
-    """True if any Write/Edit touched a path OUTSIDE ~/.claude/ (real project work)."""
+def _is_data_root_path(path: str) -> bool:
+    """True if a write path lands inside the instance data root."""
+    marker = "/" + DATA_ROOT_MARKER + "/"
+    return marker in ("/" + path.strip("/") + "/")
+
+
+def _wrote_project_file(transcript: list) -> bool:
+    """True if any Write/Edit touched a project file — anything OUTSIDE both the
+    Claude Code config dir and the instance data root. Code, docx, xlsx, md,
+    anything: substance is not code-only."""
     for path in _iter_write_paths(transcript):
-        if DOTCLAUDE_MARKER not in path:
+        if DOTCLAUDE_MARKER not in path and not _is_data_root_path(path):
             return True
     return False
 
 
 def _check_kb_written(transcript: list) -> bool:
     """True if any Write/Edit touched a path inside the data root this session."""
-    marker = "/" + DATA_ROOT_MARKER + "/"
     for path in _iter_write_paths(transcript):
-        if marker in ("/" + path.strip("/") + "/"):
+        if _is_data_root_path(path):
             return True   # data-root name appears as a path component
     return False
 
 
-def _check_brain_note(transcript: list) -> bool:
-    """True if any Bash tool_use this session ran a `brain note` (inline capture)."""
+def _iter_shell_commands(transcript: list):
+    """Yield the command string of every Bash/PowerShell tool_use."""
     for obj in transcript:
         if not isinstance(obj, dict):
             continue
         for block in _get_assistant_content(obj):
             if not isinstance(block, dict):
                 continue
-            if block.get("type") == "tool_use" and block.get("name") in ("Bash", "PowerShell"):
-                if BRAIN_NOTE_RE.search(block.get("input", {}).get("command", "") or ""):
+            if block.get("type") == "tool_use" and block.get("name") in SHELL_TOOLS:
+                yield block.get("input", {}).get("command", "") or ""
+
+
+def _ran_board_mutation(transcript: list) -> bool:
+    """True if any shell command ran a MUTATING tickets/registers verb."""
+    for cmd in _iter_shell_commands(transcript):
+        if BOARD_MUTATION_RE.search(cmd):
+            return True
+    return False
+
+
+def _check_brain_note(transcript: list) -> bool:
+    """True if the session captured or attested — a `brain note`/`resolve`/`attest`
+    run as a shell command, or the same verbs reached through the MCP server."""
+    for cmd in _iter_shell_commands(transcript):
+        if BRAIN_NOTE_RE.search(cmd):
+            return True
+    for obj in transcript:
+        if not isinstance(obj, dict):
+            continue
+        for block in _get_assistant_content(obj):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                name = block.get("name") or ""
+                if name.endswith(CAPTURE_TOOL_SUFFIXES):
                     return True
     return False
 
@@ -177,8 +231,10 @@ def main():
     transcript_path = data.get("transcript_path", "")
     transcript = _load_transcript(transcript_path)
 
-    # No project-code change this session -> nothing to enforce.
-    if not _check_project_code_changed(transcript):
+    # No substance this session -> nothing to enforce. Substance is either a
+    # project-file write (code, docx, xlsx, md — anything outside the data root
+    # and the config dir) OR a mutating tickets/registers command.
+    if not (_wrote_project_file(transcript) or _ran_board_mutation(transcript)):
         sys.exit(0)
 
     # Inline capture (or a direct write inside the data root, e.g. fixing a
@@ -192,13 +248,15 @@ def main():
             f.write(session_id)
         sys.exit(0)
 
-    # Project code changed but nothing was captured -> block and prompt.
+    # Substance this session but nothing was captured -> block and prompt.
     reason = (
-        "This session changed project code. Capture what the diff can't tell: run "
+        "This session did substantive work (edited a project file or changed the "
+        "ticket/register board). Capture what the diff can't tell: run "
         f"`python \"{BRAIN_CLI}\" note --project <scope> --type "
         "<decision|milestone|gotcha|invariant|question|papercut> \"one line\"` "
         "for each memorable thing (scope = project slug; gotcha/invariant also "
         "require --subsystem <label>; `brain resolve` for a fixed hazard also counts). "
+        "If there is genuinely nothing to capture, attest it instead. "
         "A defect you would fix belongs on the ticket board (tickets.py), not in a note. "
         "Even a trivial change is one line."
     )

@@ -91,13 +91,17 @@ requirement is enforced by the engine and its teaching error comes straight back
 in the tool result. It speaks JSON-RPC 2.0 over stdio and is stdlib-only, like
 everything else here.
 
-Tools exposed: `brain_note`, `brain_wake`, `brain_hazards`, `brain_design`,
-`brain_recall`, `brain_decisions`, `brain_grep`, `brain_resolve`,
-`brain_papercuts`; `tickets_board`, `tickets_open`, `tickets_update`,
-`tickets_close`; `registers_board`, `registers_show`, `registers_post`,
-`registers_add`. The `brain_*` tools act on the instance root (`--root` flag or
-`BRAIN_ROOT`); the board tools take a `root` argument per call — the folder is
-the deployment.
+Tools exposed: `brain_note`, `brain_attest`, `brain_wake`, `brain_hazards`,
+`brain_design`, `brain_recall`, `brain_decisions`, `brain_grep`,
+`brain_resolve`, `brain_papercuts`; `tickets_board`, `tickets_open`,
+`tickets_update`, `tickets_close`; `registers_board`, `registers_show`,
+`registers_post`, `registers_add`. The `brain_*` tools act on the instance root
+(`--root` flag or `BRAIN_ROOT`); the board tools take a `root` argument per
+call — the folder is the deployment. Because the server is a per-session
+process it also carries the engine-side capture duty: each mutating board or
+register call accrues capture debt, and once it reaches two, every later tool
+result carries one advisory line to `brain_note` (or `brain_attest` if there is
+genuinely nothing to capture). It is a notice, never a block.
 
 Print the config with your real resolved paths:
 

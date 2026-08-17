@@ -28,6 +28,7 @@ the config file / default `brain/` next to brain.py. That root is the single
 memory instance for the `brain_*` tools. The board tools (`tickets_*`,
 `registers_*`) take a `root` argument per call — the folder IS the deployment.
 """
+import datetime
 import io
 import json
 import os
@@ -101,6 +102,78 @@ def _need(args: dict, key: str):
     if v is None or (isinstance(v, str) and not v.strip()):
         raise ToolError(f"missing required argument: {key}")
     return v
+
+
+# --------------------------------------------------------------------------- #
+# Capture debt — engine-side enforcement, mirrored from the stop-gate.         #
+#                                                                              #
+# The server is a per-session process, so a module-level counter IS session    #
+# state. Every mutating board/register write accrues one unit of debt; a        #
+# brain_note (or brain_resolve) captures the knowledge and clears it, and       #
+# brain_attest is the sanctioned "nothing to capture" exit that also clears it. #
+# Once debt reaches the threshold, every subsequent tool result carries one     #
+# advisory notice line. It is a NOTICE, never a wall: no write is ever blocked  #
+# and no session is ever refused service.                                       #
+# --------------------------------------------------------------------------- #
+_MUTATING_TOOLS = {"tickets_open", "tickets_update", "tickets_close",
+                   "registers_add", "registers_post"}
+_CLEARING_TOOLS = {"brain_note", "brain_resolve", "brain_attest"}
+_DEBT_THRESHOLD = 2
+_NOTICE_TEMPLATE = ("[capture debt: {n} mutations since the last brain_note — "
+                    "capture what the diff can't tell, or brain_attest if there "
+                    "is genuinely nothing]")
+
+_debt = 0
+
+
+def _append_notice(result: dict) -> None:
+    """Append the single capture-debt notice line to a tool result's text.
+
+    One line, same wording every time, appended to the first text block so the
+    underlying result is left intact (never blocks it). Never repeats within a
+    single result.
+    """
+    notice = _NOTICE_TEMPLATE.format(n=_debt)
+    content = result.get("content") or []
+    if content and content[0].get("type") == "text":
+        content[0]["text"] = (content[0]["text"] + "\n" + notice)
+    else:
+        content.append({"type": "text", "text": notice})
+        result["content"] = content
+
+
+def _attest_log_path() -> str:
+    root = os.environ.get("BRAIN_ROOT") or _resolve_root()
+    return os.path.join(root, "_state", "attest.log")
+
+
+def _do_attest(a: dict) -> dict:
+    """brain_attest: clear the capture debt and record the attestation.
+
+    Appends `ts<TAB>reason` to `<root>/_state/attest.log` (plain text,
+    append-only) — the sanctioned "nothing to capture" exit, mirrored from the
+    stop-gate's capture-or-attest contract.
+    """
+    global _debt
+    try:
+        reason = _need(a, "reason")
+    except ToolError as e:
+        return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+    reason = " ".join(str(reason).split())  # one line
+    path = _attest_log_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{reason}\n")
+    except OSError as e:
+        return {"content": [{"type": "text",
+                             "text": f"failed to write attest log: {e}"}],
+                "isError": True}
+    _debt = 0
+    return {"content": [{"type": "text",
+                         "text": f"attested — debt cleared: {reason}"}],
+            "isError": False}
 
 
 # --------------------------------------------------------------------------- #
@@ -248,7 +321,9 @@ TOOLS = [
                        "decision, milestone, gotcha, dead-end, invariant, question, papercut. "
                        "The engine enforces caps, duplicate rejection, the routing "
                        "test, and the subsystem requirement; a rejected write returns "
-                       "the engine's teaching error so you can correct and retry.",
+                       "the engine's teaching error so you can correct and retry. "
+                       "Board/register mutations accrue capture debt that a brain_note "
+                       "(or brain_resolve/brain_attest) clears.",
         "builder": _t_brain_note,
         "inputSchema": _schema({
             "project": {**_STR, "description": "scope slug (default: global)"},
@@ -266,6 +341,19 @@ TOOLS = [
             "force_type": {**_BOOL, "description": "override the fix-language gate "
                            "for a genuine gotcha"},
         }, ["type", "text"]),
+    },
+    {
+        "name": "brain_attest",
+        "description": "The sanctioned \"nothing to capture\" exit: clear the accrued "
+                       "capture debt when a run genuinely produced no memorable "
+                       "knowledge. Mirrors the stop-gate's capture-or-attest contract "
+                       "— attest instead of forcing an empty note. Records a one-line "
+                       "reason to the instance's attest log.",
+        "builder": None,
+        "inputSchema": _schema({
+            "reason": {**_STR, "description": "one line: why there is genuinely "
+                       "nothing to capture"},
+        }, ["reason"]),
     },
     {
         "name": "brain_wake",
@@ -444,16 +532,33 @@ def _error(rpc_id, code, message):
 
 
 def _call_tool(name: str, arguments: dict) -> dict:
+    global _debt
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
         return {"content": [{"type": "text", "text": f"unknown tool: {name}"}],
                 "isError": True}
-    try:
-        script, argv = tool["builder"](arguments or {})
-    except ToolError as e:
-        return {"content": [{"type": "text", "text": str(e)}], "isError": True}
-    is_error, text = _run_cli(script, argv)
-    return {"content": [{"type": "text", "text": text}], "isError": is_error}
+    arguments = arguments or {}
+
+    if name == "brain_attest":
+        result = _do_attest(arguments)  # clears debt itself on success
+    else:
+        try:
+            script, argv = tool["builder"](arguments)
+        except ToolError as e:
+            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+        is_error, text = _run_cli(script, argv)
+        result = {"content": [{"type": "text", "text": text}], "isError": is_error}
+        # A rejected write did not mutate and an over-cap note did not capture —
+        # only real (non-error) calls move the debt counter.
+        if not is_error:
+            if name in _CLEARING_TOOLS:
+                _debt = 0
+            elif name in _MUTATING_TOOLS:
+                _debt += 1
+
+    if _debt >= _DEBT_THRESHOLD:
+        _append_notice(result)
+    return result
 
 
 def _handle(msg: dict):
