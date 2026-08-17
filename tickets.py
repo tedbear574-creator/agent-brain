@@ -202,6 +202,32 @@ def _letter_suffix(k: int) -> str:
     return "z" + str(k - 24)
 
 
+def _claim_slot(occupants: dict, slot: tuple, tid: str) -> str:
+    """Put a ticket into a (prefix, number) slot and hand back its letter
+    suffix. The first ticket in a slot gets the plain number (""); each later
+    arrival takes the lowest free letter (b, c, ...), so two tickets never
+    share a key while both sit in the slot. Idempotent for a ticket already
+    placed there. Choosing the *lowest free* index — not a running count —
+    is what lets a slot's plain number come back once its holder moves out."""
+    used = occupants.setdefault(slot, {})
+    if tid in used:
+        return _letter_suffix(used[tid])
+    taken = set(used.values())
+    k = 0
+    while k in taken:
+        k += 1
+    used[tid] = k
+    return _letter_suffix(k)
+
+
+def _release_slot(occupants: dict, slot: tuple, tid: str) -> None:
+    """Take a ticket out of a slot it is leaving, so its index (and, if it was
+    the plain-number holder, that plain number) frees up for a later mover."""
+    used = occupants.get(slot)
+    if used:
+        used.pop(tid, None)
+
+
 def fold(events: list[dict], warnings: list | None = None,
          board_prefix: str = "") -> dict:
     """Turn the ordered list of actions into the current tickets.
@@ -217,8 +243,25 @@ def fold(events: list[dict], warnings: list | None = None,
     and gets no suffix. Numbers never cascade — a clash between two tickets can
     never move a third — and the permanent id underneath never changes, so no
     earlier action is ever left pointing at the wrong ticket.
+
+    An ``edit`` that moves a ticket into another prefix (keeping its number, or
+    carrying a write-time ``propose_n``) runs through the exact same per-slot
+    accounting as an open: the mover claims the target (prefix, number) slot,
+    and if that slot already holds another ticket in the fixed replay order the
+    later arrival takes the letter suffix while the earlier occupant keeps the
+    plain number. This closes the offline-writer hole where two moves — or a
+    move and an open — into the same slot would otherwise both fold to the
+    identical key.
+
+    Vacated slots: when a ticket moves out of a slot it releases its spot, so
+    the plain number becomes available again to a *later* mover in replay order
+    (this is what lets a relabel-and-relabel-back land back on the plain
+    number). Within any single slot, at every point in the replay, no two
+    tickets share a key. Write-time number *allocation* for brand-new tickets
+    is separate and still only ever counts upward (``_next_number`` = one past
+    the highest live number in that space).
     """
-    seen_n: dict[tuple[str, int], int] = {}
+    occupants: dict[tuple[str, int], dict[str, int]] = {}
     tickets: dict[str, dict] = {}
 
     for ev in events:
@@ -243,12 +286,11 @@ def fold(events: list[dict], warnings: list | None = None,
             proposed = int(ev.get("propose_n") or 1)
             eff = _norm_prefix(ev.get("prefix")) or _norm_prefix(board_prefix)
             slot = (eff, proposed)
-            k = seen_n.get(slot, 0)
-            seen_n[slot] = k + 1
+            nsfx = _claim_slot(occupants, slot, tid)
             tickets[tid] = {
                 "id": tid,
                 "n": proposed,
-                "nsfx": _letter_suffix(k),
+                "nsfx": nsfx,
                 "prefix": _norm_prefix(ev.get("prefix")),
                 "title": ev.get("title", ""),
                 "owner": ev.get("owner") or "",
@@ -283,17 +325,25 @@ def fold(events: list[dict], warnings: list | None = None,
             t["source"] = ev.get("source", "")
             t["close_note"] = ev.get("note") or ""
         elif verb == "edit":
+            before_slot = (_eff_prefix(t, board_prefix), t["n"])
             for field in ("title", "owner", "due", "notes", "prefix"):
                 if field in ev and ev[field] is not None:
                     t[field] = (_norm_prefix(ev[field]) if field == "prefix"
                                 else ev[field])
-            # A prefix move that would collide in the target space carries a
-            # freshly allocated number (next free there); the ticket takes it
-            # and drops any clash-suffix. When the number is free the event
-            # carries none and the ticket keeps the number it already had.
-            if ev.get("propose_n") is not None:
-                t["n"] = int(ev["propose_n"])
-                t["nsfx"] = ""
+            # An edit that lands the ticket in a different (prefix, number)
+            # slot goes through the same accounting an open does. The number
+            # it aims for is the write-time ``propose_n`` when one was carried
+            # (the writer saw its own view clash), otherwise the number it
+            # already holds. Whether or not it clashes is decided here, in the
+            # fold, over the merged event set — so two offline movers into the
+            # same slot resolve deterministically instead of both keeping it.
+            target_n = (int(ev["propose_n"]) if ev.get("propose_n") is not None
+                        else t["n"])
+            after_slot = (_eff_prefix(t, board_prefix), target_n)
+            if after_slot != before_slot:
+                _release_slot(occupants, before_slot, tid)
+                t["n"] = target_n
+                t["nsfx"] = _claim_slot(occupants, after_slot, tid)
         elif verb == "update":
             # The ticket's one-line "where this stands" field. Only the
             # latest shows on the board; every earlier one stays in the log.
