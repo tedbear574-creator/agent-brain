@@ -184,6 +184,14 @@ def _norm_prefix(s) -> str:
     return (s or "").strip().upper()
 
 
+def _eff_prefix(t: dict, board_prefix: str) -> str:
+    """The short code a ticket is numbered and shown under: its own when it
+    has one, otherwise the board's. This is the space its number lives in —
+    two tickets under different effective prefixes may share a number without
+    clashing."""
+    return _norm_prefix(t.get("prefix")) or _norm_prefix(board_prefix)
+
+
 def _letter_suffix(k: int) -> str:
     """0 -> "" (the first ticket to propose a number keeps it plain),
     1 -> "b", 2 -> "c", ... — the same way hotel rooms handle an extra door."""
@@ -194,19 +202,23 @@ def _letter_suffix(k: int) -> str:
     return "z" + str(k - 24)
 
 
-def fold(events: list[dict], warnings: list | None = None) -> dict:
+def fold(events: list[dict], warnings: list | None = None,
+         board_prefix: str = "") -> dict:
     """Turn the ordered list of actions into the current tickets.
 
     Returns a dict keyed by the ticket's permanent id (the short code that
-    never changes). Each ticket also carries a display number. If two people
-    happened to propose the same number (both working before their files had
-    synced), nobody's number is taken away: the one whose action comes later
-    in the fixed order keeps the same number with a letter after it (5 and
-    5b). Numbers never cascade — a clash between two tickets can never move
-    a third — and the permanent id underneath never changes, so no earlier
-    action is ever left pointing at the wrong ticket.
+    never changes). Each ticket also carries a display number, counted within
+    its own effective prefix (its own short code when it has one, otherwise
+    the board's, passed in as ``board_prefix``). If two people happened to
+    propose the same number *under the same prefix* (both working before their
+    files had synced), nobody's number is taken away: the one whose action
+    comes later in the fixed order keeps the same number with a letter after
+    it (5 and 5b). The same number under two different prefixes is not a clash
+    and gets no suffix. Numbers never cascade — a clash between two tickets can
+    never move a third — and the permanent id underneath never changes, so no
+    earlier action is ever left pointing at the wrong ticket.
     """
-    seen_n: dict[int, int] = {}
+    seen_n: dict[tuple[str, int], int] = {}
     tickets: dict[str, dict] = {}
 
     for ev in events:
@@ -229,8 +241,10 @@ def fold(events: list[dict], warnings: list | None = None) -> dict:
                         f"it gets its own id.")
                 continue
             proposed = int(ev.get("propose_n") or 1)
-            k = seen_n.get(proposed, 0)
-            seen_n[proposed] = k + 1
+            eff = _norm_prefix(ev.get("prefix")) or _norm_prefix(board_prefix)
+            slot = (eff, proposed)
+            k = seen_n.get(slot, 0)
+            seen_n[slot] = k + 1
             tickets[tid] = {
                 "id": tid,
                 "n": proposed,
@@ -273,6 +287,13 @@ def fold(events: list[dict], warnings: list | None = None) -> dict:
                 if field in ev and ev[field] is not None:
                     t[field] = (_norm_prefix(ev[field]) if field == "prefix"
                                 else ev[field])
+            # A prefix move that would collide in the target space carries a
+            # freshly allocated number (next free there); the ticket takes it
+            # and drops any clash-suffix. When the number is free the event
+            # carries none and the ticket keeps the number it already had.
+            if ev.get("propose_n") is not None:
+                t["n"] = int(ev["propose_n"])
+                t["nsfx"] = ""
         elif verb == "update":
             # The ticket's one-line "where this stands" field. Only the
             # latest shows on the board; every earlier one stays in the log.
@@ -303,7 +324,8 @@ def _status_of(t: dict) -> str:
 
 def board_state(root: str) -> dict:
     warnings: list = []
-    tickets = fold(sorted_events(root), warnings)
+    board_prefix = load_config(root)["prefix"]
+    tickets = fold(sorted_events(root), warnings, board_prefix=board_prefix)
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
     return tickets
@@ -316,11 +338,19 @@ def board_state(root: str) -> dict:
 
 def resolve_ticket(tickets: dict, prefix: str, token: str) -> dict:
     """Accept a bare number (3), the full key (ACME-DOC-3), or the permanent
-    6-character id. Returns the ticket or ends with a plain error."""
+    hex id. Returns the ticket or ends with a plain error.
+
+    A full key resolves within its own prefix's number space. A bare number
+    resolves against the board's own prefix first; if nothing there carries
+    it but exactly one ticket anywhere on the board does, that one is taken;
+    if several prefixes share the number, the error lists them so the caller
+    can say which."""
     token = (token or "").strip()
     if not token:
         _die("Which ticket? Give me its number, its key like "
              f"{prefix}-3, or its id.")
+
+    board_pfx = _norm_prefix(prefix)
 
     # Permanent id: a short run of hex characters.
     low = token.lower()
@@ -330,35 +360,52 @@ def resolve_ticket(tickets: dict, prefix: str, token: str) -> dict:
 
     # Full key: PREFIX-<n> (case-insensitive on the prefix), or a bare
     # number, either optionally carrying a letter (5, 5b, ACME-5b).
+    key_prefix = None
     num = token
     dash = token.rfind("-")
     if dash != -1:
+        key_prefix = _norm_prefix(token[:dash])
         num = token[dash + 1:]
 
     m = re.fullmatch(r"(\d+)([a-z](?:\d+)?)?", num.lower())
-    if m:
-        n, sfx = int(m.group(1)), m.group(2) or ""
-        for t in tickets.values():
-            if t["n"] == n and t["nsfx"] == sfx:
-                return t
-        others = sorted((t for t in tickets.values() if t["n"] == n),
-                        key=lambda t: t["nsfx"])
-        if others:
-            hint = ", ".join(f"{key_of(prefix, t)} ({t['title']})"
-                             for t in others)
-            _die(f"There is no ticket {prefix}-{n}{sfx}, but there is: {hint}")
-        _die(f"There is no ticket {prefix}-{n}{sfx} on this board.")
+    if not m:
+        _die(f"I don't recognise \"{token}\". Use a number, a key like "
+             f"{prefix}-3, or a ticket id.")
+    n, sfx = int(m.group(1)), m.group(2) or ""
 
-    _die(f"I don't recognise \"{token}\". Use a number, a key like "
-         f"{prefix}-3, or a ticket id.")
+    if key_prefix:
+        for t in tickets.values():
+            if (_eff_prefix(t, board_pfx) == key_prefix
+                    and t["n"] == n and t["nsfx"] == sfx):
+                return t
+        _die(f"There is no ticket {key_prefix}-{n}{sfx} on this board.")
+
+    # Bare number: the board's own prefix wins first.
+    for t in tickets.values():
+        if (_eff_prefix(t, board_pfx) == board_pfx
+                and t["n"] == n and t["nsfx"] == sfx):
+            return t
+    matches = [t for t in tickets.values()
+               if t["n"] == n and t["nsfx"] == sfx]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        cands = ", ".join(
+            key_of(prefix, t)
+            for t in sorted(matches, key=lambda t: _eff_prefix(t, board_pfx)))
+        _die(f"More than one ticket is numbered {n}{sfx}: {cands}. "
+             f"Say which one by its full key.")
+    _die(f"There is no ticket {board_pfx}-{n}{sfx} on this board.")
 
 
 def key_of(prefix: str, t: dict) -> str:
     """The key people say out loud. The short code in front is the ticket's
     own (the project or engagement it really belongs to) when it has one,
-    otherwise the board's. The number after it is the ticket's identity: it
-    is unique across the whole board, so changing the code in front never
-    renumbers anything and old references keep working."""
+    otherwise the board's. The number after it counts within that code's own
+    space: on a re-label the ticket keeps its number when that number is free
+    under the new code, otherwise it takes the next free one there. The
+    permanent hex id underneath never changes and is the reference that always
+    works."""
     return f"{t.get('prefix') or prefix}-{t['n']}{t['nsfx']}"
 
 
@@ -435,8 +482,14 @@ def _write_launcher(root: str) -> None:
         f.write(body)
 
 
-def _max_number(tickets: dict) -> int:
-    return max((t["n"] for t in tickets.values()), default=0)
+def _next_number(tickets: dict, board_prefix: str, target_prefix: str) -> int:
+    """The next free number in one prefix's own space: one more than the
+    highest number any live-or-closed ticket already carries under that
+    effective prefix. Each prefix counts from 1 independently."""
+    tgt = _norm_prefix(target_prefix)
+    board = _norm_prefix(board_prefix)
+    return max((t["n"] for t in tickets.values()
+                if _eff_prefix(t, board) == tgt), default=0) + 1
 
 
 def cmd_open(args) -> int:
@@ -479,15 +532,17 @@ def act_open(root: str, *, title: str, owner: str | None = None,
     if not title:
         raise TicketError("A new ticket needs a title — a short line saying "
                           "what it is about.")
+    board_prefix = load_config(root)["prefix"]
     tickets = board_state(root)
     tid = _new_id(tickets)
+    eff_prefix = _norm_prefix(prefix) or _norm_prefix(board_prefix)
     event = {
         "ts": _now(),
         "writer": writer,
         "verb": "open",
         "id": tid,
         "title": title,
-        "propose_n": _max_number(tickets) + 1,
+        "propose_n": _next_number(tickets, board_prefix, eff_prefix),
     }
     if owner and owner.strip():
         event["owner"] = owner.strip()
@@ -499,7 +554,7 @@ def act_open(root: str, *, title: str, owner: str | None = None,
         event["prefix"] = _norm_prefix(prefix)
     append_event(root, event)
     # Re-fold so the number we report is the one the board will actually show.
-    return fold(sorted_events(root))[tid]
+    return fold(sorted_events(root), board_prefix=board_prefix)[tid]
 
 
 def _act_mutate(root: str, ticket_token: str, verb: str, build,
@@ -510,16 +565,16 @@ def _act_mutate(root: str, ticket_token: str, verb: str, build,
     tickets = board_state(root)
     t = resolve_ticket(tickets, cfg["prefix"], ticket_token)
     event = {"ts": _now(), "writer": writer, "verb": verb, "id": t["id"]}
-    build(event, t, writer, cfg)
+    build(event, t, writer, cfg, tickets)
     append_event(root, event)
     # Re-fold so the returned ticket reflects the change just made — the CLI
     # prints from it and the web server hands it straight back to the page.
-    return fold(sorted_events(root))[t["id"]]
+    return fold(sorted_events(root), board_prefix=cfg["prefix"])[t["id"]]
 
 
 def act_claim(root: str, ticket_token: str, *, owner: str | None = None,
               writer: str | None = None) -> dict:
-    def build(ev, t, w, cfg):
+    def build(ev, t, w, cfg, tickets):
         ev["owner"] = (owner.strip() if owner and owner.strip() else w)
     return _act_mutate(root, ticket_token, "claim", build, writer=writer)
 
@@ -531,7 +586,7 @@ def act_block(root: str, ticket_token: str, *, reason: str,
         raise TicketError("Say what is in the way — blocking a ticket needs a "
                           "reason.")
 
-    def build(ev, t, w, cfg):
+    def build(ev, t, w, cfg, tickets):
         ev["reason"] = reason
     return _act_mutate(root, ticket_token, "block", build, writer=writer)
 
@@ -539,7 +594,7 @@ def act_block(root: str, ticket_token: str, *, reason: str,
 def act_reopen(root: str, ticket_token: str, *,
                writer: str | None = None) -> dict:
     return _act_mutate(root, ticket_token, "reopen",
-                       lambda ev, t, w, cfg: None, writer=writer)
+                       lambda ev, t, w, cfg, tickets: None, writer=writer)
 
 
 def _close_source_hint(writer: str) -> str:
@@ -560,7 +615,7 @@ def act_close(root: str, ticket_token: str, *, source: str,
     if not source:
         raise TicketError(_close_source_hint(writer))
 
-    def build(ev, t, w, cfg):
+    def build(ev, t, w, cfg, tickets):
         ev["source"] = source
         if note and note.strip():
             ev["note"] = note.strip()
@@ -580,8 +635,22 @@ def act_edit(root: str, ticket_token: str, *, fields: dict,
         raise TicketError("Nothing to change. Give at least one of title, "
                           "owner, due, or notes.")
 
-    def build(ev, t, w, cfg):
+    def build(ev, t, w, cfg, tickets):
         ev.update(clean)
+        # Moving a ticket to another short code: it keeps its number when that
+        # number is free in the target space, otherwise the event carries the
+        # next free number there and the fold renumbers it. Either way the id
+        # underneath is untouched.
+        if "prefix" in clean:
+            board_prefix = cfg["prefix"]
+            target = _norm_prefix(clean["prefix"]) or _norm_prefix(board_prefix)
+            taken = any(
+                other["id"] != t["id"]
+                and _eff_prefix(other, board_prefix) == target
+                and other["n"] == t["n"] and other["nsfx"] == t["nsfx"]
+                for other in tickets.values())
+            if taken:
+                ev["propose_n"] = _next_number(tickets, board_prefix, target)
     return _act_mutate(root, ticket_token, "edit", build, writer=writer)
 
 
@@ -592,7 +661,7 @@ def act_update(root: str, ticket_token: str, *, text: str,
         raise TicketError("Say where the ticket stands — an update can't "
                           "be empty.")
 
-    def build(ev, t, w, cfg):
+    def build(ev, t, w, cfg, tickets):
         ev["text"] = text
     return _act_mutate(root, ticket_token, "update", build, writer=writer)
 
@@ -603,7 +672,7 @@ def act_comment(root: str, ticket_token: str, *, text: str,
     if not text:
         raise TicketError("Say something — a comment can't be empty.")
 
-    def build(ev, t, w, cfg):
+    def build(ev, t, w, cfg, tickets):
         ev["text"] = text
     return _act_mutate(root, ticket_token, "comment", build, writer=writer)
 
@@ -996,7 +1065,7 @@ def cmd_log(args) -> int:
     root = resolve_root(args)
     cfg = load_config(root)
     events = sorted_events(root)
-    tickets = fold(events)
+    tickets = fold(events, board_prefix=cfg["prefix"])
     t = resolve_ticket(tickets, cfg["prefix"], args.ticket)
     print(f"History of {key_of(cfg['prefix'], t)} — {t['title']}")
     for ev in events:
@@ -1240,8 +1309,8 @@ class _BoardHandler(http.server.BaseHTTPRequestHandler):
             token = (query.get("ticket") or [""])[0]
             try:
                 events = sorted_events(self.server.root)
-                folded = fold(events)
                 cfg = load_config(self.server.root)
+                folded = fold(events, board_prefix=cfg["prefix"])
                 t = resolve_ticket(folded, cfg["prefix"], token)
             except TicketError as e:
                 self._json({"error": str(e)}, 400)
@@ -1825,7 +1894,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prefix",
                    help="file this ticket under a different short code than "
                         "the board's — the project or engagement it really "
-                        "belongs to (its number stays board-wide)")
+                        "belongs to (numbered in that code's own space, from 1)")
     p.set_defaults(fn=cmd_open)
 
     p = sub.add_parser("claim", help="take a ticket (or assign it with --owner)")
@@ -1864,9 +1933,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--due")
     p.add_argument("--notes")
     p.add_argument("--prefix",
-                   help="move the ticket under a different short code; its "
-                        "number stays the same. An empty value (--prefix \"\") "
-                        "goes back to the board's own code")
+                   help="move the ticket under a different short code; it "
+                        "keeps its number when that number is free there, "
+                        "else takes the next free one (the new key is printed). "
+                        "An empty value (--prefix \"\") goes back to the "
+                        "board's own code")
     p.set_defaults(fn=cmd_edit)
 
     p = sub.add_parser("update",
