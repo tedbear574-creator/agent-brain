@@ -585,9 +585,9 @@ def test_full_lifecycle_smoke(tmp_path, monkeypatch, capsys):
 def test_open_with_prefix_override(tmp_path, monkeypatch):
     root = make_board(tmp_path, monkeypatch)
     run("open", "board-default ticket", "--root", root)
-    run("open", "ccdesk-side ticket", "--root", root, "--prefix", "ccdesk")
+    run("open", "web-side ticket", "--root", root, "--prefix", "web")
     keys = set(_keys(root).values())
-    assert keys == {"ACME-DOC-1", "CCDESK-2"}
+    assert keys == {"ACME-DOC-1", "WEB-2"}
 
 
 def test_edit_prefix_relabels_without_renumbering(tmp_path, monkeypatch):
@@ -610,8 +610,8 @@ def test_edit_prefix_relabels_without_renumbering(tmp_path, monkeypatch):
 
 def test_prefix_is_tidied_for_display(tmp_path, monkeypatch):
     root = make_board(tmp_path, monkeypatch)
-    run("open", "messy code", "--root", root, "--prefix", "  cockpit ")
-    assert set(_keys(root).values()) == {"COCKPIT-1"}
+    run("open", "messy code", "--root", root, "--prefix", "  gadget ")
+    assert set(_keys(root).values()) == {"GADGET-1"}
 
 
 # --------------------------------------------------------------------------- #

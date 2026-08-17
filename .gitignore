@@ -1,0 +1,18 @@
+# Instance data must NEVER live in the package tree. A deployment's data root
+# (streams, trees, boards, registers, transcript DB, spend/audit spools) is the
+# instance; this repo is only the vehicle. The default data root is ./brain.
+/brain/
+brain.config.json
+
+# Runtime spool / state that some deployments place at the package root
+/_state/
+*.jsonl
+brain-history.db
+brain-spend.jsonl
+log-audit.txt
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

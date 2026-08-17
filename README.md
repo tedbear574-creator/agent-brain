@@ -1,0 +1,118 @@
+# Agent Brain
+
+Durable, greppable memory for agent-driven work — plain text, stdlib-only, and
+portable enough to run from a folder copy on a locked-down laptop.
+
+Agent Brain is three small command-line tools over an append-only, plain-text
+store:
+
+- **`brain`** — the memory engine: an append-only typed **stream** per scope, a
+  generated lossy **tree** (state summary + branch gists), verbatim **pins** and
+  a verbatim **hazard index**. The tree is a deterministic function of the stream
+  — no model calls, no scheduler — rebuilt inline on every write.
+- **`tickets`** — a multi-writer **ticket board**: the one place a fixable defect
+  or tracked commitment lives. Per-writer append-only event logs folded into a
+  computed board, so it is conflict-free under folder sync.
+- **`registers`** — multi-writer **registers**: repeated records of one schema
+  (entities, documents, interviews, expenses…), each a folder with its own
+  config and CSV/board faces.
+
+The distinction that makes it work: **a defect you would fix is a ticket, not a
+note; a fact the next session must know is a note; a repeated structured record
+is a register.** Three classes, three homes (`docs/PROTOCOL.md` has the full
+routing rules).
+
+## Why it's different
+
+Automatic-write + similarity-recall memory systems bloat and drift. Agent Brain
+counters that with **deliberate typed writes**, **deterministic routing** (no
+embeddings, no similarity search anywhere), and **explicit lifecycle**
+(supersede, resolve, retire). Knowledge lives in plain text; intelligence lives
+in the harness; the glue is thin and enumerable — six Claude Code hooks and three
+CLIs.
+
+## Three-class routing
+
+| Class | Home | Example |
+|---|---|---|
+| **Pin** | `invariant --pin`, verbatim at the top of every wake | "the auth token lives in env var X, never in code" |
+| **Stream** | a typed `note`, retrieved on demand | a decision + why, a gotcha, an abandoned approach, an open question |
+| **Register** | a `registers` table with `--root <dir>` | one row per client, per document, per expense |
+
+## Two deployment profiles
+
+- **Dev machine (git available)** — every `brain` write commits; git is the
+  stream's safety net (the stream is the only non-regenerable artifact).
+- **Locked-down / OneDrive machine (no git)** — the engine detects no git and
+  degrades explicitly: the append-only spool files plus your folder-sync version
+  history are the record, and `brain doctor` says so out loud. Tickets and
+  registers are conflict-free under sync by design (per-writer files).
+
+Multi-writer honesty: **tickets and registers are multi-writer**; the **stream
+is single-writer per instance** in v1 (a shared narrative stream is a known open
+problem, deliberately out of scope).
+
+## Quickstart
+
+### Folder-copy profile (no install, no git, no admin)
+
+```sh
+# Copy/unzip the package folder anywhere (e.g. a synced OneDrive path), then:
+python brain.py init --no-git          # scaffolds ./brain and reports the profile
+python brain.py note -p demo -t decision "use the deterministic tree"
+python brain.py wake --scope demo
+python tickets.py init --root ./boards/work --prefix WORK --name "Work board"
+python tickets.py open "fix the flaky test" --root ./boards/work
+```
+
+Point any tool at a different instance with `BRAIN_ROOT` (for `brain`) or
+`--root` (for `tickets`/`registers`). No pip installs, no compiled dependencies —
+Python 3.9+ standard library only.
+
+### Full install (data root + Claude Code hooks)
+
+```sh
+python install/install.py --root ./brain --name my-deployment
+python brain.py doctor        # green when git-backed; explicit when not
+```
+
+The installer creates the instance, writes `brain.config.json` naming its data
+root, and merges the six hooks into your Claude Code `settings.json` (with a
+timestamped backup). Use `--print-only` to get the snippet to paste yourself, or
+`--no-git` for the folder-sync profile.
+
+## Instance model
+
+An instance is **one data root** plus a config naming it. The root is resolved in
+priority order:
+
+1. `BRAIN_ROOT` environment variable
+2. the `root` key in `brain.config.json` next to `brain.py`
+3. default: a `brain/` folder next to `brain.py`
+
+Nothing hardcodes a home directory. The repo never contains instance data — a
+fresh instance is empty, not a copy of anyone's memory (a structural test
+enforces this).
+
+## Layout
+
+```
+brain.py            the memory engine CLI
+tickets.py          the ticket board CLI
+registers.py        the register CLI
+hooks/              Claude Code enforcement layer (instance-relative)
+install/install.py  create an instance + wire hooks (stdlib only)
+docs/PROTOCOL.md    conventions & write protocol (read this)
+docs/TICKETS-SPEC.md, docs/REGISTERS-SPEC.md
+tests/              pytest suites (stdlib + pytest)
+```
+
+## Running the tests
+
+```sh
+python -m pytest tests -q
+```
+
+## License
+
+MIT — see `LICENSE`.

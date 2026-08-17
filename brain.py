@@ -2719,6 +2719,81 @@ def cmd_history(args) -> int:
     return cmd_history_search(argparse.Namespace(query=rest))
 
 
+# ---------------------------------------------------------------- init / doctor
+
+def _git_available() -> bool:
+    return shutil.which("git") is not None
+
+
+def _root_is_git_backed() -> bool:
+    if not _git_available():
+        return False
+    try:
+        r = subprocess.run(["git", "-C", KB_ROOT, "rev-parse", "--is-inside-work-tree"],
+                           capture_output=True, timeout=10)
+        return r.returncode == 0 and r.stdout.decode("utf-8", "replace").strip() == "true"
+    except Exception:
+        return False
+
+
+def cmd_init(args) -> int:
+    """Create a fresh, empty instance at the data root: the directory scaffold,
+    a _state/ git-ignore, and an optional git repo when git is available. Safe to
+    re-run — never touches existing stream data."""
+    created = not os.path.isdir(KB_ROOT)
+    for sub in ("stream", "tree", "tickets", "registers", "_state"):
+        os.makedirs(os.path.join(KB_ROOT, sub), exist_ok=True)
+    # Keep the growing/binary runtime artefacts out of the stream's git.
+    gi = os.path.join(KB_ROOT, ".gitignore")
+    if not os.path.exists(gi):
+        with open(gi, "w", encoding="utf-8") as f:
+            f.write("# Agent Brain instance — runtime state is not the record.\n"
+                    "_state/\n")
+    want_git = not getattr(args, "no_git", False)
+    if want_git and _git_available() and not _root_is_git_backed():
+        try:
+            subprocess.run(["git", "-C", KB_ROOT, "init", "-q"],
+                           capture_output=True, timeout=15, check=True)
+        except Exception as e:
+            print(f"(git init skipped: {e})", file=sys.stderr)
+    print(f"brain instance {'created' if created else 'ready'} at {KB_ROOT}")
+    print(f"  config: BRAIN_ROOT / {_config_path()} / default ./brain")
+    if not _root_is_git_backed():
+        print("  NOTE: no git — the stream's safety net is the append-only spool "
+              "files plus your folder-sync history (e.g. OneDrive versions), not "
+              "commits. Run `brain doctor` for the full picture.")
+    return 0
+
+
+def cmd_doctor(_args) -> int:
+    """Report on the instance: where the data root is, how it was resolved, and —
+    critically — whether the stream has a git safety net or is running in the
+    degraded no-git (folder-sync) profile."""
+    print(f"data root : {KB_ROOT}")
+    src = ("BRAIN_ROOT env" if os.environ.get("BRAIN_ROOT")
+           else "config file" if _load_config().get("root")
+           else "default (./brain next to brain.py)")
+    print(f"resolved  : {src}")
+    print(f"config    : {_config_path()}"
+          + ("" if os.path.exists(_config_path()) else " (absent)"))
+    exists = os.path.isdir(STREAM_DIR)
+    print(f"stream dir: {STREAM_DIR}" + ("" if exists else "  (not initialized — run `brain init`)"))
+    if exists:
+        print(f"scopes    : {len(_scopes())}")
+    if _root_is_git_backed():
+        print("git       : OK — every write commits; the stream is protected by git.")
+        return 0
+    if not _git_available():
+        print("git       : ABSENT (git is not installed).")
+    else:
+        print("git       : ABSENT (the data root is not a git repo).")
+    print("            DEGRADED PROFILE: the stream's safety net is the append-only")
+    print("            spool files themselves plus your folder-sync version history")
+    print("            (e.g. OneDrive). Writes still land; there are no commits to")
+    print("            roll back to. This is expected on a locked-down machine.")
+    return 0
+
+
 # ---------------------------------------------------------------- main
 
 def main() -> int:
@@ -2735,7 +2810,7 @@ def main() -> int:
                    help="citation: the evidence behind this entry (commit sha, "
                    "file path, projects/<scope>/<topic>.md, url); one token, "
                    "comma-separate multiples")
-    p.add_argument("--subsystem", help="hazard label to assign now (skips the haiku labeler)")
+    p.add_argument("--subsystem", help="hazard/invariant label (required for gotcha/invariant)")
     p.add_argument("--force-type", dest="force_type", action="store_true",
                    help="override the fix-language gate for a genuine gotcha")
     p.add_argument("--distinct", action="store_true",
@@ -2854,6 +2929,14 @@ def main() -> int:
     p = sub.add_parser("sessions", help="entries grouped by capture session (sid)")
     p.add_argument("--scope", "--project", dest="scope")
     p.set_defaults(fn=cmd_sessions)
+
+    p = sub.add_parser("init", help="create a fresh, empty instance at the data root")
+    p.add_argument("--no-git", dest="no_git", action="store_true",
+                   help="do not init a git repo (folder-sync / no-git profile)")
+    p.set_defaults(fn=cmd_init)
+
+    p = sub.add_parser("doctor", help="report the instance's data root and git safety-net status")
+    p.set_defaults(fn=cmd_doctor)
 
     args = ap.parse_args()
     return args.fn(args)

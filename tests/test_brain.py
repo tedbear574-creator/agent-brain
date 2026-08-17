@@ -2,7 +2,7 @@
 the fail-loud dispatch stub + wake's ticket-board section (§4).
 
 Every test runs against a throwaway BRAIN_ROOT built by the `root` fixture — the
-live ~/.claude/global-kb is never touched. Commands are driven end to end via
+real data root is never touched. Commands are driven end to end via
 subprocess so argparse wiring and exit codes are exactly what the reviewer
 re-runs. A handful of pure-function checks import brain directly.
 """
