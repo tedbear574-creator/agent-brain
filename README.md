@@ -137,6 +137,30 @@ Nothing hardcodes a home directory. The repo never contains instance data — a
 fresh instance is empty, not a copy of anyone's memory (a structural test
 enforces this).
 
+## Updating
+
+The package and the instance are separate on purpose, so updating is safe and
+dumb:
+
+- **Git profile**: `git pull` in the package folder. Done.
+- **Folder-copy profile** (no git): replace the package folder with the new
+  copy. Your `brain.config.json` is the only file of yours inside the package
+  folder — keep it (or re-create it: it is two lines).
+
+No update ever touches instance data. The stream format is append-only and
+stable — treated as a contract, not an implementation detail. Generated files
+(trees, indexes, board pages) are caches: if an update ever changes how they
+render, `brain rebuild --all` regenerates everything from the stream. There
+are no migrations to run, because the one non-regenerable artifact — the
+stream — is never rewritten.
+
+## Coming from an existing documentation system
+
+Read [`docs/TRANSITION.md`](docs/TRANSITION.md): a seeding guide for moving a
+project that already documents itself another way (wiki, README stack, agent
+instruction files) onto the brain — what to seed, what to deliberately leave
+as documents, and why bulk-importing is the one way to do it wrong.
+
 ## Layout
 
 ```
