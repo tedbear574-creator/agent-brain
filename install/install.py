@@ -54,8 +54,12 @@ HOOK_MATCHERS = {
 
 
 def _hook_command(script: str) -> str:
-    py = sys.executable or "python"
-    return f'"{py}" "{os.path.join(HOOKS_DIR, script)}"'
+    # Forward slashes on every OS: the Claude Code hook runner treats backslashes
+    # in a settings.json command as escape sequences, so a Windows path with `\U`
+    # or `\k` would break. Forward slashes work on Windows too.
+    py = (sys.executable or "python").replace("\\", "/")
+    script_path = os.path.join(HOOKS_DIR, script).replace("\\", "/")
+    return f'"{py}" "{script_path}"'
 
 
 def _hook_entry(event: str, script: str) -> dict:
@@ -66,9 +70,10 @@ def _hook_entry(event: str, script: str) -> dict:
 
 
 def _is_ours(hook_block: dict) -> bool:
+    hooks_fs = HOOKS_DIR.replace("\\", "/")
     for h in hook_block.get("hooks", []):
-        cmd = h.get("command", "")
-        if HOOKS_DIR in cmd or "brain" in os.path.basename(cmd):
+        cmd = h.get("command", "").replace("\\", "/")
+        if hooks_fs in cmd:
             return True
     return False
 
