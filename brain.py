@@ -2726,12 +2726,19 @@ def _git_available() -> bool:
 
 
 def _root_is_git_backed() -> bool:
-    if not _git_available():
+    """True only when the data root is the TOP of its own git worktree. A root
+    merely NESTED inside another repo (e.g. the default ./brain inside the
+    package clone, where it is gitignored) is NOT protected — its writes never
+    commit — so doctor must not claim a safety net that isn't there."""
+    if not _git_available() or not os.path.isdir(KB_ROOT):
         return False
     try:
-        r = subprocess.run(["git", "-C", KB_ROOT, "rev-parse", "--is-inside-work-tree"],
+        r = subprocess.run(["git", "-C", KB_ROOT, "rev-parse", "--show-toplevel"],
                            capture_output=True, timeout=10)
-        return r.returncode == 0 and r.stdout.decode("utf-8", "replace").strip() == "true"
+        if r.returncode != 0:
+            return False
+        top = r.stdout.decode("utf-8", "replace").strip()
+        return bool(top) and os.path.samefile(top, KB_ROOT)
     except Exception:
         return False
 
