@@ -109,11 +109,28 @@ There are three homes for a durable fact, and the class decides the home:
 - `brain branches <s>` / `brain status` — tree shape / store health.
 - `brain history "<query>"` — the un-curated transcript archive (pull-only).
 
-## Enforcement (hooks)
+## Enforcement (two layers)
 
-The `hooks/` directory holds the Claude Code enforcement layer. Every hook
-resolves the instance from `BRAIN_ROOT` / config / the default `brain/` folder —
-none hardcode a path. All injection hooks honor `BRAIN_NO_INJECT=1`.
+Enforcement lives in the ENGINE so every surface gets the discipline; the hooks
+are accelerators for one surface, not the mechanism. It is NEVER a wall: no
+write is ever blocked and no session is ever refused service — enforcement is
+notices and obligations. Both layers run the SAME capture-or-attest contract:
+capture what the diff can't tell, or attest that there is genuinely nothing.
+
+**Engine-side (every MCP surface — the desktop app and any other non-hook
+client).** The MCP server (`brain_mcp.py`) is a per-session process, so it
+carries session state: each mutating board/register call (`tickets_open` /
+`tickets_update` / `tickets_close`, `registers_add` / `registers_post`) accrues
+one unit of *capture debt*. A `brain_note` (or `brain_resolve`) clears it, and
+`brain_attest` — the sanctioned "nothing to capture" exit — clears it and
+records a one-line reason to `<root>/_state/attest.log`. Once debt reaches two,
+every subsequent tool result carries a single advisory notice line reminding the
+model to capture or attest. The notice never blocks the underlying result.
+
+**Hook-side (Claude Code).** The `hooks/` directory holds the Claude Code
+enforcement layer. Every hook resolves the instance from `BRAIN_ROOT` / config /
+the default `brain/` folder — none hardcode a path. All injection hooks honor
+`BRAIN_NO_INJECT=1`. The Stop hook gates on session substance (see below).
 
 - **SessionStart `kb_card_inject.py`** — injects the cwd scope's `[BRAIN WAKE]`
   (root state + newest raw tail + pull map). Scope = the first path component
@@ -125,9 +142,11 @@ none hardcode a path. All injection hooks honor `BRAIN_NO_INJECT=1`.
 - **UserPromptSubmit `kb_topic_inject.py`** — when a prompt raises a topic that
   live decisions/questions/invariants already speak to, injects those rulings
   verbatim, once per entry per session.
-- **Stop `kb_stop_guard.py`** — on sessions that edited project code, blocks the
-  first stop until the session ran `brain note`/`brain resolve` or wrote inside
-  the data root. `BRAIN_NO_STOP_GUARD=1` exempts a delegated worker.
+- **Stop `kb_stop_guard.py`** — on sessions with substance — a write to any
+  project file (code, docx, xlsx, md — anything outside the data root and the
+  config dir) OR a mutating tickets/registers command — blocks the first stop
+  until the session ran `brain note`/`brain resolve`/`brain attest` or wrote
+  inside the data root. `BRAIN_NO_STOP_GUARD=1` exempts a delegated worker.
 - **PreToolUse `kb_write_authority.py`** — denies writes into the data root from
   a delegated worker (`BRAIN_DELEGATE=1`): the stream is single-writer per
   instance.

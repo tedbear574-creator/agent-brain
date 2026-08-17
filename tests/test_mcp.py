@@ -266,6 +266,101 @@ def test_registers_round_trip(client, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Capture debt — engine-side enforcement                                      #
+# --------------------------------------------------------------------------- #
+def _make_board(tmp_path):
+    board = str(tmp_path / "work")
+    r = subprocess.run([sys.executable, TICKETS, "init", "--root", board,
+                        "--prefix", "WORK", "--name", "Work board"],
+                       env=_clean_env(), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return board
+
+
+NOTICE = "capture debt"
+
+
+def test_debt_notice_after_two_mutations(client, tmp_path):
+    board = _make_board(tmp_path)
+    # First mutation: debt = 1, no notice yet.
+    is_error, text = client.call_text("tickets_open", {"root": board, "title": "one"})
+    assert not is_error, text
+    assert NOTICE not in text
+    # Second mutation: debt = 2, the notice appears — appended, not replacing.
+    is_error, text = client.call_text("tickets_open", {"root": board, "title": "two"})
+    assert not is_error, text
+    assert NOTICE in text
+    assert "two" in text  # underlying result is intact — never blocked
+    assert "2 mutations" in text
+
+
+def test_brain_note_clears_debt(client, tmp_path):
+    board = _make_board(tmp_path)
+    client.call_text("tickets_open", {"root": board, "title": "a"})
+    is_error, text = client.call_text("tickets_open", {"root": board, "title": "b"})
+    assert NOTICE in text  # debt >= 2 now
+    # A brain_note captures and clears the debt — its own result carries no notice.
+    is_error, text = client.call_text(
+        "brain_note", {"project": "demo", "type": "milestone", "text": "captured it"})
+    assert not is_error, text
+    assert NOTICE not in text
+    # And a following mutation starts the count over: debt = 1, no notice.
+    is_error, text = client.call_text("tickets_open", {"root": board, "title": "c"})
+    assert not is_error, text
+    assert NOTICE not in text
+
+
+def test_brain_attest_clears_debt_and_writes_log(client, tmp_path):
+    kb = str(tmp_path / "kb")  # the client fixture builds its instance here
+    board = _make_board(tmp_path)
+    client.call_text("tickets_open", {"root": board, "title": "a"})
+    is_error, text = client.call_text("tickets_open", {"root": board, "title": "b"})
+    assert NOTICE in text  # debt >= 2
+    # brain_attest is the sanctioned "nothing to capture" exit.
+    is_error, text = client.call_text(
+        "brain_attest", {"reason": "pure board housekeeping, nothing to capture"})
+    assert not is_error, text
+    assert NOTICE not in text  # its own result is clear
+    # The attestation landed in the append-only log under the instance root.
+    log = os.path.join(kb, "_state", "attest.log")
+    assert os.path.exists(log), "attest.log was not written"
+    with open(log, encoding="utf-8") as f:
+        body = f.read()
+    assert "pure board housekeeping" in body
+    # Debt is cleared: the next mutation is debt = 1, no notice.
+    is_error, text = client.call_text("tickets_open", {"root": board, "title": "c"})
+    assert not is_error, text
+    assert NOTICE not in text
+
+
+def test_brain_attest_requires_reason(client):
+    is_error, text = client.call_text("brain_attest", {})
+    assert is_error
+    assert "reason" in text
+
+
+def test_notice_never_blocks_the_result(client, tmp_path):
+    board = _make_board(tmp_path)
+    client.call_text("tickets_open", {"root": board, "title": "a"})
+    client.call_text("tickets_open", {"root": board, "title": "b"})
+    # A read-only call while in debt still returns its real content, plus notice.
+    is_error, text = client.call_text("tickets_board", {"root": board})
+    assert not is_error, text
+    assert NOTICE in text
+    assert "WORK-1" in text  # the board itself is present, unblocked
+
+
+def test_brain_attest_listed_with_contract(client):
+    resp = client.request("tools/list")
+    tools = {t["name"]: t for t in resp["result"]["tools"]}
+    assert "brain_attest" in tools
+    # Its description states what it is for.
+    assert "nothing to capture" in tools["brain_attest"]["description"].lower()
+    # brain_note's description tells the model mutations create debt.
+    assert "capture debt" in tools["brain_note"]["description"].lower()
+
+
+# --------------------------------------------------------------------------- #
 # Root resolution                                                             #
 # --------------------------------------------------------------------------- #
 def test_root_flag_selects_the_instance(tmp_path):
