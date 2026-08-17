@@ -1219,3 +1219,103 @@ def test_rebuild_includes_pins(root):
     body = open(rootmd, encoding="utf-8").read()
     assert "Pinned facts (always loaded):" in body
     assert fact in body
+
+
+# ------------------------------------------ AGENT-BRAIN-41 anti-hits
+# When a query's strongest textual match is a DEAD (superseded) entry, retrieval
+# must not go silent: recall and grep surface ONE forward pointer to the live
+# head of the supersede chain, showing the head's TEXT (never the stale text).
+
+
+def _antihit_lines(out):
+    """Anti-hit pointer lines only — the marker is a leading '~' (recall prefixes
+    a scope in brackets, grep prefixes the scope bare, so match either)."""
+    return [ln for ln in out.splitlines()
+            if ln.lstrip().startswith("~") or " ~ #" in ln]
+
+
+def test_recall_antihit_points_to_live_head(root):
+    # Dead #1 matches the query; the live head #2 uses different words, so it is
+    # NOT a normal hit — the pointer is the only way the reader learns of it.
+    run(root, "note", "-p", "demo", "-t", "decision",
+        "billing retries use exponential backoff scheduling", expect=0)
+    run(root, "note", "-p", "demo", "-t", "decision", "--supersedes", "1",
+        "billing now delegates to Stripe dunning entirely", expect=0)
+    out = run(root, "recall", "exponential backoff scheduling policy", expect=0).stdout
+    anti = _antihit_lines(out)
+    assert len(anti) == 1, out
+    assert "superseded by #2" in anti[0]
+    assert "#1" in anti[0]
+    # The live head's text is surfaced…
+    assert "Stripe dunning" in anti[0]
+    # …and the stale text is NEVER re-printed.
+    assert "exponential backoff" not in out
+
+
+def test_recall_antihit_dedupes_when_head_is_a_hit(root):
+    # Query matches BOTH dead #1 and live head #2; #2 is already a normal hit, so
+    # no extra pointer line is emitted.
+    run(root, "note", "-p", "demo", "-t", "decision",
+        "cache invalidation uses timestamp comparison for freshness", expect=0)
+    run(root, "note", "-p", "demo", "-t", "decision", "--supersedes", "1",
+        "cache invalidation uses content-hash comparison for freshness", expect=0)
+    out = run(root, "recall", "cache invalidation comparison freshness", expect=0).stdout
+    assert "content-hash comparison" in out          # live head shown as a real hit
+    assert _antihit_lines(out) == [], out            # no duplicate pointer
+
+
+def test_recall_antihit_follows_chain_to_final_head(root):
+    # Two supersessions: #1 -> #2 -> #3. A match on #1 must point at the FINAL
+    # live head #3, never the intermediate (itself-superseded) #2.
+    run(root, "note", "-p", "demo", "-t", "decision",
+        "kubernetes deployment rollout uses blue-green strategy", expect=0)
+    run(root, "note", "-p", "demo", "-t", "decision", "--supersedes", "1",
+        "kubernetes deployment rollout uses canary strategy instead", expect=0)
+    run(root, "note", "-p", "demo", "-t", "decision", "--supersedes", "2",
+        "orchestration handed to a managed platform entirely nowadays", expect=0)
+    out = run(root, "recall", "blue-green rollout strategy variant", expect=0).stdout
+    anti = _antihit_lines(out)
+    assert len(anti) == 1, out
+    assert "superseded by #3" in anti[0]
+    assert "superseded by #2" not in anti[0]
+    assert "managed platform" in anti[0]
+
+
+def test_recall_antihit_capped_at_three(root):
+    # Four independent dead entries all match; only three pointer lines survive.
+    for n in range(4):
+        run(root, "note", "-p", "demo", "-t", "decision", "--distinct",
+            f"biscuit gremlin protocol variant {n}", expect=0)
+        # supersede the entry just written (indices: 1,3,5,7 are the dead ones)
+        run(root, "note", "-p", "demo", "-t", "decision", "--supersedes",
+            str(2 * n + 1), f"topic {n} resolved via unrelated foobar widget", expect=0)
+    out = run(root, "recall", "biscuit gremlin", expect=0).stdout
+    anti = _antihit_lines(out)
+    assert len(anti) == 3, out
+    for ln in anti:
+        assert "biscuit gremlin" not in ln           # stale text never shown
+
+
+def test_grep_antihit_points_to_live_head(root):
+    # grep already prints the dead line (flagged [SUPERSEDED by #2]); the anti-hit
+    # adds the live head's TEXT so the correction is legible in place.
+    run(root, "note", "-p", "demo", "-t", "decision",
+        "session token stored in localStorage", expect=0)
+    run(root, "note", "-p", "demo", "-t", "decision", "--supersedes", "1",
+        "session token stored in an httpOnly cookie now", expect=0)
+    out = run(root, "grep", "localStorage", "--scope", "demo", expect=0).stdout
+    anti = _antihit_lines(out)
+    assert len(anti) == 1, out
+    assert "superseded by #2" in anti[0]
+    assert "httpOnly cookie" in anti[0]
+
+
+def test_grep_antihit_dedupes_when_head_matches(root):
+    # When the live head ALSO matches the regex it is already printed verbatim, so
+    # no pointer line is added.
+    run(root, "note", "-p", "demo", "-t", "decision",
+        "retry budget capped at five attempts per window", expect=0)
+    run(root, "note", "-p", "demo", "-t", "decision", "--supersedes", "1",
+        "retry budget capped at ten attempts per window", expect=0)
+    out = run(root, "grep", "retry budget capped", "--scope", "demo", expect=0).stdout
+    assert _antihit_lines(out) == [], out

@@ -1516,6 +1516,12 @@ def cmd_grep(args) -> int:
         return 1
     scopes = [args.scope] if args.scope else _scopes()
     hits = 0
+    printed: set[tuple[str, int]] = set()
+    # (scope, head) -> (dead_idx, head_line) for dead matches whose live head is
+    # not itself a printed hit. grep already shows the dead line (flagged
+    # [SUPERSEDED by #N]); the anti-hit adds the head's TEXT so the correction is
+    # legible without a second lookup.
+    anti: dict[tuple[str, int], tuple[int, str]] = {}
     for s in scopes:
         entries = _read_entries(s)
         dead = _superseded(entries)
@@ -1523,8 +1529,24 @@ def cmd_grep(args) -> int:
             if rx.search(ln):
                 print(f"{s} {_fmt(i, ln, dead)}")
                 hits += 1
+                printed.add((s, i))
+                if i in dead:
+                    head = dead[i]
+                    key = (s, head)
+                    if key not in anti:
+                        anti[key] = (i, entries[head - 1])
+    anti_rows = []
+    for (s, head), (dead_i, head_ln) in sorted(anti.items(),
+                                               key=lambda kv: (kv[0][0], kv[1][0])):
+        if len(anti_rows) >= ANTIHIT_MAX:
+            break
+        if (s, head) in printed:                # live head already shown verbatim
+            continue
+        anti_rows.append(f"{s} {_antihit_line(dead_i, head, head_ln)}")
     if not hits:
         print("(no matches)")
+    for row in anti_rows:
+        print(row)
     return 0
 
 
@@ -1670,6 +1692,42 @@ def _recall_entry_tokens(text: str) -> set[str]:
     return {_recall_stem(w) for w in _recall_words(text) if len(w) >= RECALL_MIN_TOKEN}
 
 
+def _recall_hit(toks: dict[str, int], text: str) -> int:
+    """Recall match score for `text` against query tokens, or 0 for no match.
+    Same lexical gate cmd_recall applies to live entries, factored out so the
+    dead-entry (anti-hit) path scores by exactly the same rule."""
+    hits = set(toks) & _recall_entry_tokens(text)
+    if not hits:
+        return 0
+    strong = [h for h in hits if toks[h] >= RECALL_STRONG_LEN]
+    acronym = [h for h in hits if toks[h] >= RECALL_ACRONYM]
+    if acronym or (len(hits) >= RECALL_MIN_HITS and len(strong) >= RECALL_MIN_STRONG):
+        return len(hits) + len(strong) + 2 * len(acronym)
+    return 0
+
+
+# --- anti-hits --------------------------------------------------------------
+# When a query's strongest textual match is a DEAD (superseded) entry, silence
+# is the worst answer: the reader either sees nothing or digs the stale text out
+# of the raw stream and acts on it. Instead surface ONE forward pointer to the
+# live head of the supersede chain — the dead text itself is never re-printed
+# (a stale ruling served verbatim is worse than none; the correction pointer is
+# the whole product).
+ANTIHIT_MAX = 3          # at most this many anti-hit lines per query
+ANTIHIT_CLIP = 140       # live-head text clip length
+
+
+def _antihit_line(dead_idx: int, head_idx: int, head_line: str) -> str:
+    """One forward-pointer line: `~ #<dead> superseded by #<head> [type]: <head text>`.
+    Only the LIVE head's text is shown, clipped; the dead text never appears."""
+    p = _parse(head_line)
+    typ = p[1] if p else "?"
+    text = " ".join((p[3] if p else head_line).split())
+    if len(text) > ANTIHIT_CLIP:
+        text = text[:ANTIHIT_CLIP - 1].rstrip() + "…"
+    return f"~ #{dead_idx} superseded by #{head_idx} [{typ}]: {text}"
+
+
 def cmd_recall(args) -> int:
     """Live advisory entries across scopes whose text shares topic words with
     the given text. Bounded with an explicit overflow pointer (invariant #31)."""
@@ -1682,23 +1740,31 @@ def cmd_recall(args) -> int:
     scopes = [args.scope] if args.scope else _scopes()
     budget = getattr(args, "budget", 0) or 0
     scored: list[tuple[int, str, int, str]] = []
+    # Anti-hit candidates: a DEAD entry matched, so its live head carries the
+    # correction. Keyed forward to (scope, head) — deduped there against real
+    # hits and against sibling dead entries sharing the same head.
+    anti: dict[tuple[str, int], tuple[int, int, str]] = {}
     for s in scopes:
         entries = _read_entries(s)
         dead = _superseded(entries)
         for i, ln in enumerate(entries, start=1):
-            if i in dead or f"{s}#{i}" in exclude:
+            if f"{s}#{i}" in exclude:
                 continue
             p = _parse(ln)
             if not p or p[1] not in RECALL_TYPES:
                 continue
-            hits = set(toks) & _recall_entry_tokens(p[3])
-            strong = [h for h in hits if toks[h] >= RECALL_STRONG_LEN]
-            acronym = [h for h in hits if toks[h] >= RECALL_ACRONYM]
-            if acronym or (len(hits) >= RECALL_MIN_HITS
-                           and len(strong) >= RECALL_MIN_STRONG):
-                scored.append((len(hits) + len(strong) + 2 * len(acronym), s, i, ln))
-    if not scored:
-        return 0
+            score = _recall_hit(toks, p[3])
+            if not score:
+                continue
+            if i in dead:
+                head = dead[i]
+                key = (s, head)
+                # Keep the strongest-scoring dead entry per live head; a shorter
+                # #dead loses to a stronger match on the same chain.
+                if key not in anti or score > anti[key][0]:
+                    anti[key] = (score, i, entries[head - 1])
+                continue
+            scored.append((score, s, i, ln))
     scored.sort(key=lambda r: (-r[0], -r[2]))
     kept, used, ids = [], 0, []
     for hits, s, i, ln in scored[:RECALL_MAX]:
@@ -1708,16 +1774,37 @@ def cmd_recall(args) -> int:
         kept.append(row)
         ids.append(f"{s}#{i}")
         used += len(row) + 1
-    if not kept:
+    # Anti-hits come AFTER real hits, share the same char budget, and cap at
+    # ANTIHIT_MAX. Drop any whose live head is already a printed hit (no
+    # duplicate) or was excluded as already-injected.
+    kept_ids = set(ids)
+    anti_rows = []
+    for (s, head), (score, dead_i, head_ln) in sorted(
+            anti.items(), key=lambda kv: (-kv[1][0], kv[0][0], kv[1][1])):
+        if len(anti_rows) >= ANTIHIT_MAX:
+            break
+        if f"{s}#{head}" in kept_ids or f"{s}#{head}" in exclude:
+            continue
+        row = _antihit_line(dead_i, head, head_ln).replace("~ ", f"~ [{s}] ", 1)
+        if budget and used + len(row) > budget:
+            break
+        anti_rows.append(row)
+        used += len(row) + 1
+    if not kept and not anti_rows:
         return 0
-    withheld = len(scored) - len(kept)
-    print(f"[BRAIN RECALL] {len(kept)} live entr{'y' if len(kept) == 1 else 'ies'} "
-          "bearing on what you just raised — verbatim rulings, not a summary:")
-    print("\n".join(kept))
-    if withheld:
-        by_scope = sorted({s for _h, s, _i, _l in scored[len(kept):]})
-        print(f"({withheld} more in {', '.join(by_scope)} — "
-              f"`brain decisions --scope <s>` or `brain grep RX`)")
+    if kept:
+        withheld = len(scored) - len(kept)
+        print(f"[BRAIN RECALL] {len(kept)} live entr{'y' if len(kept) == 1 else 'ies'} "
+              "bearing on what you just raised — verbatim rulings, not a summary:")
+        print("\n".join(kept))
+        if withheld:
+            by_scope = sorted({s for _h, s, _i, _l in scored[len(kept):]})
+            print(f"({withheld} more in {', '.join(by_scope)} — "
+                  f"`brain decisions --scope <s>` or `brain grep RX`)")
+    if anti_rows:
+        print("[BRAIN RECALL] superseded match(es) — pointer to the live head, "
+              "not the stale text:")
+        print("\n".join(anti_rows))
     print("MATCHED-IDS: " + ",".join(ids))
     return 0
 
