@@ -81,6 +81,49 @@ root, and merges the six hooks into your Claude Code `settings.json` (with a
 timestamped backup). Use `--print-only` to get the snippet to paste yourself, or
 `--no-git` for the folder-sync profile.
 
+## MCP server
+
+`brain_mcp.py` exposes the same three tools to any Model Context Protocol client
+(a desktop chat app, an editor, another agent) — so a surface with no Claude Code
+hook layer still gets the engine's discipline. Every tool call shells out to the
+real CLI, so each caps check, duplicate rejection, routing test, and subsystem
+requirement is enforced by the engine and its teaching error comes straight back
+in the tool result. It speaks JSON-RPC 2.0 over stdio and is stdlib-only, like
+everything else here.
+
+Tools exposed: `brain_note`, `brain_wake`, `brain_hazards`, `brain_design`,
+`brain_recall`, `brain_decisions`, `brain_grep`, `brain_resolve`,
+`brain_papercuts`; `tickets_board`, `tickets_open`, `tickets_update`,
+`tickets_close`; `registers_board`, `registers_show`, `registers_post`,
+`registers_add`. The `brain_*` tools act on the instance root (`--root` flag or
+`BRAIN_ROOT`); the board tools take a `root` argument per call — the folder is
+the deployment.
+
+Print the config with your real resolved paths:
+
+```sh
+python install/install.py --print-mcp --root ./brain
+```
+
+**Claude Desktop** — add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "agent-brain": {
+      "command": "python",
+      "args": ["/path/to/agent-brain/brain_mcp.py", "--root", "/path/to/brain"]
+    }
+  }
+}
+```
+
+**Claude Code** — one command:
+
+```sh
+claude mcp add agent-brain -- python /path/to/agent-brain/brain_mcp.py --root /path/to/brain
+```
+
 ## Instance model
 
 An instance is **one data root** plus a config naming it. The root is resolved in
@@ -98,6 +141,7 @@ enforces this).
 
 ```
 brain.py            the memory engine CLI
+brain_mcp.py        the MCP server (same tools over JSON-RPC stdio)
 tickets.py          the ticket board CLI
 registers.py        the register CLI
 hooks/              Claude Code enforcement layer (instance-relative)
