@@ -176,3 +176,51 @@ zero LLM dependency and zero OS-scheduler dependency: the tree is rebuilt
 mechanically on write. On a git-backed machine every write commits; on a no-git
 folder-sync machine the append-only spool files plus the sync's version history
 are the record, and `brain doctor` says which profile is active.
+
+## Shared scopes — one scope, many machines
+
+A solo scope is a single append-only file, `stream/<scope>.log`, written by one
+machine. That file corrupts if two machines on a sync folder (OneDrive, Dropbox)
+append to it at once. A **shared scope** removes that hazard the same way the
+ticket board does: one spool file per writer plus a deterministic read-side fold.
+
+**Layout.** A scope is shared iff `stream/<scope>/` exists (a directory).
+
+- `stream/<scope>.log` — the FROZEN legacy history. Read forever, appended never.
+- `stream/<scope>/<writer>.log` — one append-only spool per writer. A machine
+  writes ONLY its own spool, so no two machines ever touch the same file and
+  nothing conflicts on a sync folder.
+
+The writer id comes from the `writer` key in `brain.config.json`, defaulting to
+the same derivation `tickets.py` uses (the last segment of the home path);
+`BRAIN_WRITER` overrides it.
+
+**Opt-in, one-way.** `brain share --scope X` converts a solo scope: it freezes
+`X.log` and creates `stream/X/`. Solo scopes are otherwise untouched — existing
+instances, numbering, supersede refs, and every read/write path work unchanged.
+Sharing is per scope and cannot be undone (the frozen log is what guarantees
+legacy id stability).
+
+**Ids never move.** Every entry has a stable id:
+
+- a legacy entry keeps its numeric id (`7`) — the frozen file makes it permanent;
+- a spool entry is `<writer>:<seq>`, where `seq` is its 1-based line number in
+  that writer's own spool — append-only, so stable forever.
+
+Display order is the fold: entries sorted by `(write-ts, writer, seq)`, legacy
+first on a tie. A late-arriving synced spool may interleave a row earlier or
+later, but **no id ever changes** — order is display, id is identity. Everything
+that references an entry (`--supersedes`, `resolve`, pins, the hazard index, the
+anti-hit chain walk) accepts and stores both id forms; a cross-writer ref is
+stored verbatim (`sup=alice:3,7`).
+
+**Fold is deterministic and read-side.** The same set of files produces the same
+fold on every machine with no coordination. All read paths (wake, hazards,
+design, recall, grep, zoom, decisions/…, rebuild, lint, status) consume the fold;
+all write paths append to the current writer's spool only. Caps, the duplicate
+gate, and supersede semantics are unchanged — the dup gate compares against the
+folded live view, and cross-writer supersession is allowed mechanically. `lint`
+reports a supersede ref that points at an id not present yet (a spool not synced)
+as a WARNING, not an error: sync lag is a normal state. `brain doctor` names each
+shared scope's writer set and flags any spool whose write timestamps run
+backwards.
