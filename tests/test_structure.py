@@ -33,6 +33,27 @@ SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".venv", "brain", "_state"}
 
 
 def _iter_files():
+    """Files that would actually ship: tracked + untracked-but-not-ignored.
+
+    Gitignored files (an instance's brain.config.json next to the engine, a
+    local brain/ data root) are the INTENDED deployment shape — the guards
+    police the publishable tree, so they scan what git would publish. Falls
+    back to a raw walk outside a git checkout.
+    """
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "-C", ROOT, "ls-files", "--cached", "--others",
+             "--exclude-standard"],
+            capture_output=True, timeout=15)
+        if r.returncode == 0:
+            for rel in r.stdout.decode("utf-8", errors="replace").splitlines():
+                rel = rel.strip()
+                if rel:
+                    yield os.path.join(ROOT, rel)
+            return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     for dirpath, dirnames, filenames in os.walk(ROOT):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
