@@ -741,6 +741,125 @@ def test_edit_prefix_renumbers_on_collision(tmp_path, monkeypatch, capsys):
 
 
 # --------------------------------------------------------------------------- #
+# edit-move clash accounting (the fold resolves collisions, not just opens)    #
+# --------------------------------------------------------------------------- #
+# The open path registers every proposed number in the fold's per-slot
+# accounting and suffixes same-slot clashes. Edits that move a ticket into
+# another prefix must run through that same accounting, or two offline writers
+# can each drop a ticket into the same (prefix, number) slot and the board
+# silently shows two tickets with the identical key.
+
+
+def _read_forward_reverse(root, monkeypatch):
+    """Fold the board with the events read in both directions; assert the
+    keys are identical (determinism) and return them once."""
+    real_listdir = os.listdir
+    monkeypatch.setattr(tickets.os, "listdir",
+                        lambda p: sorted(real_listdir(p)))
+    forward = _keys(root)
+    monkeypatch.setattr(tickets.os, "listdir",
+                        lambda p: sorted(real_listdir(p), reverse=True))
+    reverse = _keys(root)
+    assert forward == reverse
+    return forward
+
+
+def test_two_offline_moves_into_same_slot_suffix(tmp_path, monkeypatch):
+    """Two writers, each offline, move a ticket into the same free WEB-5 slot.
+    Each saw the slot free, so neither edit carries a propose_n. The fold must
+    hand the later mover (by replay order) the letter suffix; the earlier keeps
+    the plain number, and no third ticket moves."""
+    root = make_board(tmp_path, monkeypatch)
+    # A bystander that must never be touched by the clash resolution.
+    write_raw(root, "seed", [
+        {"ts": "2026-08-16T08:00:00", "writer": "seed", "verb": "open",
+         "id": "cccccccc", "title": "bystander", "propose_n": 7,
+         "prefix": "WEB"},
+    ])
+    # Two tickets numbered 5, each under its own prefix (no clash there).
+    write_raw(root, "alice", [
+        {"ts": "2026-08-16T09:00:00", "writer": "alice", "verb": "open",
+         "id": "aaaaaaaa", "title": "foo five", "propose_n": 5, "prefix": "FOO"},
+        # ...then alice moves it into WEB, where (from her view) 5 is free.
+        {"ts": "2026-08-16T10:00:00", "writer": "alice", "verb": "edit",
+         "id": "aaaaaaaa", "prefix": "WEB"},
+    ])
+    write_raw(root, "bob", [
+        {"ts": "2026-08-16T09:00:00", "writer": "bob", "verb": "open",
+         "id": "bbbbbbbb", "title": "bar five", "propose_n": 5, "prefix": "BAR"},
+        # ...bob does the same, later in replay order (10:01 > 10:00).
+        {"ts": "2026-08-16T10:01:00", "writer": "bob", "verb": "edit",
+         "id": "bbbbbbbb", "prefix": "WEB"},
+    ])
+    keys = _read_forward_reverse(root, monkeypatch)
+    assert keys["aaaaaaaa"] == "WEB-5"    # earlier mover keeps the plain number
+    assert keys["bbbbbbbb"] == "WEB-5b"   # later mover folds with the suffix
+    assert keys["cccccccc"] == "WEB-7"    # the bystander never moves
+
+
+def test_open_and_move_into_same_slot_suffix(tmp_path, monkeypatch):
+    """One writer opens WEB-5 while another moves a ticket into WEB-5. The
+    fold resolves them exactly like two opens: whoever lands later in replay
+    order takes the suffix. Deterministic regardless of file read order."""
+    root = make_board(tmp_path, monkeypatch)
+    # carol opens WEB-5 directly, earlier in replay order.
+    write_raw(root, "carol", [
+        {"ts": "2026-08-16T09:00:00", "writer": "carol", "verb": "open",
+         "id": "cccccccc", "title": "opened five", "propose_n": 5,
+         "prefix": "WEB"},
+    ])
+    # alice opens FOO-5 then moves it into WEB, later in replay order.
+    write_raw(root, "alice", [
+        {"ts": "2026-08-16T08:00:00", "writer": "alice", "verb": "open",
+         "id": "aaaaaaaa", "title": "moved five", "propose_n": 5,
+         "prefix": "FOO"},
+        {"ts": "2026-08-16T10:00:00", "writer": "alice", "verb": "edit",
+         "id": "aaaaaaaa", "prefix": "WEB"},
+    ])
+    keys = _read_forward_reverse(root, monkeypatch)
+    assert keys["cccccccc"] == "WEB-5"    # the open landed first
+    assert keys["aaaaaaaa"] == "WEB-5b"   # the move landed later -> suffix
+
+
+def test_open_and_move_into_same_slot_suffix_reversed_order(tmp_path,
+                                                            monkeypatch):
+    """The mirror of the above: when the move lands *earlier* than the open,
+    the move keeps the plain number and the open takes the suffix. Same rule,
+    opposite winner — the replay order decides, nothing else."""
+    root = make_board(tmp_path, monkeypatch)
+    # alice's move now lands at 09:00; carol's open at 10:00.
+    write_raw(root, "alice", [
+        {"ts": "2026-08-16T08:00:00", "writer": "alice", "verb": "open",
+         "id": "aaaaaaaa", "title": "moved five", "propose_n": 5,
+         "prefix": "FOO"},
+        {"ts": "2026-08-16T09:00:00", "writer": "alice", "verb": "edit",
+         "id": "aaaaaaaa", "prefix": "WEB"},
+    ])
+    write_raw(root, "carol", [
+        {"ts": "2026-08-16T10:00:00", "writer": "carol", "verb": "open",
+         "id": "cccccccc", "title": "opened five", "propose_n": 5,
+         "prefix": "WEB"},
+    ])
+    keys = _read_forward_reverse(root, monkeypatch)
+    assert keys["aaaaaaaa"] == "WEB-5"    # the move landed first this time
+    assert keys["cccccccc"] == "WEB-5b"   # the later open takes the suffix
+
+
+def test_edit_into_free_slot_still_folds_plain(tmp_path, monkeypatch):
+    """Regression: an ordinary move into a free slot is unchanged — plain
+    number, empty suffix, no letter anywhere. Solo boards see zero difference."""
+    root = make_board(tmp_path, monkeypatch)
+    run("open", "will move", "--root", root)                    # ACME-DOC-1
+    run("open", "stays put", "--root", root)                    # ACME-DOC-2
+    run("edit", "--root", root, "--ticket", "1", "--prefix", "web")
+    tk = tickets.board_state(root)
+    moved = _ticket_by_n(root, 1)
+    assert tickets.key_of("ACME-DOC", moved) == "WEB-1"
+    assert moved["nsfx"] == ""
+    assert set(_keys(root).values()) == {"WEB-1", "ACME-DOC-2"}
+
+
+# --------------------------------------------------------------------------- #
 # bare-number resolution across prefixes                                       #
 # --------------------------------------------------------------------------- #
 
