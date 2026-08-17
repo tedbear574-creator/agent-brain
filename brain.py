@@ -65,6 +65,8 @@ Durability: every note/resolve auto-commits its stream file to the KB git repo
 Entries are stamped with sid=<8 hex> from CLAUDE_CODE_SESSION_ID when present,
 giving per-session capture counts (`brain sessions`) a real denominator.
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -156,10 +158,10 @@ NOSTATE_TYPES = STANDING_TYPES + ("papercut",)  # never feed the summary/root pa
 SUBSYSTEM_REQUIRED = ("gotcha", "invariant")   # verbatim-index types need a retrieval axis
 # A code fact is atomic ("hook paths need forward slashes") and 300 chars is a
 # feature. An advisory fact is conditional — the ruling, its why, and what would
-# reverse it — and the reasoning IS the content. Career/family-estate/wealth-plan
-# averaged 94% of a flat 300 cap and their entries were being chopped mid-clause
-# by the author to get under the gate. Caps are per type; every derived push
-# budget bounds on MAX_TEXT_ANY, never on the default.
+# reverse it — and the reasoning IS the content. In the origin deployment,
+# advisory-heavy scopes averaged 94% of a flat 300 cap and their entries were
+# being chopped mid-clause by the author to get under the gate. Caps are per
+# type; every derived push budget bounds on MAX_TEXT_ANY, never on the default.
 MAX_TEXT = 300
 MAX_TEXT_BY_TYPE = {"decision": 800, "question": 800}
 MAX_TEXT_ANY = max([MAX_TEXT, *MAX_TEXT_BY_TYPE.values()])
@@ -230,7 +232,7 @@ DUP_STOP = {
 }
 DUP_MIN_TOKENS = 6     # below this, overlap is noise
 # 0.50, not 0.55: a genuine restatement of an existing ruling scored 0.53 and
-# slipped through as a warning. Backtest over 943 historic entries — 0.42% would
+# slipped through as a warning. A backtest over 943 entries — 0.42% would
 # block at 0.55, 0.95% at 0.50, 1.06% at 0.45. The step from 0.50 to 0.45 buys
 # almost nothing and starts catching entries that merely share a subject.
 DUP_BLOCK = 0.50       # reject: reconcile explicitly
@@ -1364,8 +1366,8 @@ def cmd_wake(args) -> int:
     mile = [(i, p) for i, p in parsed
             if p and p[1] == "milestone" and i not in dead]
     print(f"[BRAIN WAKE scope={scope}] state — computed from the stream: "
-          f"{len(live_state)} live rulings (of {n} entries), verbatim, "
-          f"newest first:")
+          f"{len(live_state)} live rulings (of {n} entries), newest first "
+          f"(long rulings clipped — `brain decisions` for full text):")
     shown_state, used = [], 0
     for i, p in reversed(live_state):
         line = _fmt(i, entries[i - 1], dead)
@@ -1580,7 +1582,7 @@ def cmd_papercuts(args) -> int:
 # Code memory works because it is PUSHED at the moment of risk: the edit gate
 # fires on a Write and puts the subsystem's hazards in front of the session
 # whether or not it thought to ask. Conversation had no such moment — an
-# advisory scope (career, family-estate, wealth-plan) got the wake at minute
+# advisory scope got the wake at minute
 # zero and nothing for the next two hours, so every later retrieval depended on
 # the agent remembering to run `brain decisions`, which is exactly the discipline
 # gap the hazard gate was built to close on the code side.

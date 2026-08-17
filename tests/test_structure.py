@@ -26,7 +26,8 @@ FORBIDDEN_FILE_RX = re.compile(
 # Tokens that name the origin instance's private infrastructure. `.gitignore`
 # legitimately names the data-root basename `brain/`, so it is exempt from the
 # path scan; these tokens, though, must appear NOWHERE.
-PERSONAL_TOKENS = ["Users\\tod", "Users/tod", "global-kb", "okf-tools", "ccdesk", "cockpit"]
+PERSONAL_TOKENS = ["Users\\tod", "Users/tod", "global-kb", "okf-tools", "ccdesk", "cockpit",
+                   "family-estate", "wealth-plan", "wholesale-ops", "networth"]
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".venv", "brain", "_state"}
 
