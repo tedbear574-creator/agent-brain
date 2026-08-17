@@ -78,6 +78,7 @@ giving per-session capture counts (`brain sessions`) a real denominator.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -342,9 +343,22 @@ def _is_shared(scope: str) -> bool:
 
 
 def _safe_writer(name: str) -> str:
-    """Keep a writer id usable as a filename (mirrors tickets.py _safe_name)."""
-    keep = [c if (c.isalnum() or c in "-_.") else "-" for c in name]
-    return "".join(keep).strip("-") or "unknown"
+    """Keep a writer id usable as a filename (mirrors tickets.py _safe_name).
+
+    Lowercased, so an id reads identically everywhere ids are compared after
+    lowercasing (recall --exclude, the injection hooks). When sanitizing had to
+    replace characters, a short hash of the original is appended: two distinct
+    raw names ('a/b' and 'a b') must never silently share one spool file —
+    that would reintroduce the same-file concurrent appends spools exist to
+    prevent."""
+    raw = name.lower()
+    cleaned = "".join(c if (c.isalnum() or c in "-_.") else "-" for c in raw)
+    cleaned = cleaned.strip("-")
+    if not cleaned:
+        return "unknown"
+    if cleaned != raw:
+        cleaned += "-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:4]
+    return cleaned
 
 
 def _writer_id() -> str:
@@ -446,11 +460,6 @@ def _parse(line: str):
     if len(p3) != 3:
         return None
     return p3[0], p3[1], "", p3[2]
-
-
-def _meta_get(meta: str, key: str) -> list[int]:
-    m = re.search(rf"\b{key}=([\d,#]+)", meta)
-    return [int(x) for x in re.findall(r"\d+", m.group(1))] if m else []
 
 
 def _meta_str(meta: str, key: str) -> str:
@@ -1485,11 +1494,13 @@ def _path_tokens(path: str) -> set[str]:
 
 
 def _hazard_path_matches(scope: str, path: str,
-                         exclude: set[int] | None = None) -> list[tuple[int, str]]:
+                         exclude: set[str] | None = None) -> list[tuple[int, str]]:
     """Live hazards in `scope` whose text OR subsystem label shares a whole word
     with the edited path's subsystem tokens. Whole-word (set intersection), so a
     path token 'amount' matches the word 'amount' but not the substring in
-    'amounts'. Superseded and excluded (already-injected) entries drop out.
+    'amounts'. Superseded and excluded (already-injected) entries drop out;
+    `exclude` holds display ids as strings — numeric for a solo scope,
+    writer:seq for a shared one — matching what MATCHED-IDS emits.
 
     Cheap: one linear pass over the stream, no LLM. This is the retrieval axis the
     just-in-time hazard gate keys on — a session editing a subsystem is shown the
@@ -1519,7 +1530,7 @@ def _hazard_path_matches(scope: str, path: str,
     # flooding common token could push a genuinely relevant hazard past the cap.
     scored: list[tuple[int, int, str]] = []
     for i, ln in enumerate(entries, start=1):
-        if i in dead or i in exclude or not _is_hazard(ln):
+        if i in dead or _did(ids, i) in exclude or not _is_hazard(ln):
             continue
         p = _parse(ln)
         if not p:
@@ -1537,7 +1548,9 @@ def cmd_hazards(args) -> int:
     match_path = getattr(args, "match_path", None)
     if match_path:
         scope = args.scope or "global"
-        exclude = {int(x) for x in re.findall(r"\d+", getattr(args, "exclude", "") or "")}
+        # Both display-id forms: numeric (solo/legacy) and writer:seq (shared).
+        exclude = set(re.findall(r"[a-z0-9._-]+:\d+|\d+",
+                                 (getattr(args, "exclude", "") or "").lower()))
         matched = _hazard_path_matches(scope, match_path, exclude)
         if not matched:
             return 0  # silent: nothing in this scope keys to the edited path
@@ -3269,7 +3282,8 @@ def main() -> int:
                    help="only hazards whose text/label whole-word-match this file "
                         "path (just-in-time edit gate); silent when none match")
     p.add_argument("--exclude",
-                   help="comma-separated entry #s to skip (session dedup for the gate)")
+                   help="comma-separated entry ids to skip — numeric or "
+                        "writer:seq (session dedup for the gate)")
     p.set_defaults(fn=cmd_hazards)
 
     p = sub.add_parser("design", help="live invariants verbatim, grouped by subsystem")

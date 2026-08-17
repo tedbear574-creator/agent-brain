@@ -60,19 +60,21 @@ def _gc_sentinels() -> None:
         pass
 
 
-def _read_seen(sentinel: str) -> set[int]:
+def _read_seen(sentinel: str) -> set[str]:
+    # Display ids as strings: numeric for a solo scope, writer:seq for a shared
+    # one. Same token grammar the engine's --exclude parser uses.
     try:
         with open(sentinel, "r", encoding="utf-8") as f:
-            return {int(x) for x in re.findall(r"\d+", f.read())}
+            return set(re.findall(r"[a-z0-9._-]+:\d+|\d+", f.read().lower()))
     except OSError:
         return set()
 
 
-def _write_seen(sentinel: str, ids: set[int]) -> None:
+def _write_seen(sentinel: str, ids: set[str]) -> None:
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         with open(sentinel, "w", encoding="utf-8") as f:
-            f.write(",".join(str(i) for i in sorted(ids)))
+            f.write(",".join(sorted(ids)))
     except OSError:
         pass
 
@@ -111,15 +113,16 @@ def main() -> None:
     _gc_sentinels()
 
     # File-matched hazards for THIS path, minus anything already injected.
-    exclude = ",".join(str(i) for i in sorted(seen))
+    exclude = ",".join(sorted(seen))
     matched_out = _brain("hazards", "--scope", scope, "--match-path", path,
                        *(["--exclude", exclude] if exclude else []))
-    matched_ids: set[int] = set()
+    matched_ids: set[str] = set()
     body = ""
     if matched_out:
         m = re.search(r"^MATCHED-IDS:\s*(.*)$", matched_out, re.MULTILINE)
         if m:
-            matched_ids = {int(x) for x in re.findall(r"\d+", m.group(1))}
+            matched_ids = {t.strip() for t in m.group(1).lower().split(",")
+                           if t.strip()}
         # Strip the machine line before it reaches the model.
         body = re.sub(r"^MATCHED-IDS:.*$", "", matched_out, flags=re.MULTILINE).strip()
 
@@ -134,7 +137,8 @@ def main() -> None:
                     "--budget", str(MAX_INJECT_CHARS - 1200), "--prefer", path)
         if full and "(no live hazard" not in full and "(no hazard entries)" not in full:
             parts.append(full)
-            matched_ids |= {int(x) for x in re.findall(r"(?m)#(\d+)\b", full)}
+            matched_ids |= set(re.findall(
+                r"(?m)#([a-z0-9._-]+:\d+|\d+)\b", full.lower()))
 
     if first_edit:
         design = _brain("design", "--scope", scope, "--budget", "1000")

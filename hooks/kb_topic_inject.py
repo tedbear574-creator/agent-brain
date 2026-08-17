@@ -64,7 +64,7 @@ def _gc_sentinels() -> None:
 def _read_seen(sentinel: str) -> set[str]:
     try:
         with open(sentinel, "r", encoding="utf-8") as f:
-            return {t for t in re.findall(r"[a-z0-9_-]+#\d+", f.read().lower())}
+            return {t for t in re.findall(r"[a-z0-9_-]+#[a-z0-9._:-]+", f.read().lower())}
     except OSError:
         return set()
 
@@ -113,7 +113,7 @@ def main() -> None:
         return
 
     m = re.search(r"^MATCHED-IDS:\s*(.*)$", out, re.MULTILINE)
-    ids = {t for t in re.findall(r"[a-z0-9_-]+#\d+", (m.group(1) if m else "").lower())}
+    ids = {t for t in re.findall(r"[a-z0-9_-]+#[a-z0-9._:-]+", (m.group(1) if m else "").lower())}
     body = re.sub(r"^MATCHED-IDS:.*$", "", out, flags=re.MULTILINE).strip()
     if not body or not ids:
         return

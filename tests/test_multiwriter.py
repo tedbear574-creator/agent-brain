@@ -332,3 +332,52 @@ def test_doctor_reports_shared_scope_and_writers(root):
     assert "shared" in r.stdout.lower()
     assert "team" in r.stdout
     assert "alice" in r.stdout and "bob" in r.stdout
+
+
+# ------------------------------------------------- hazard gate id round-trip
+
+def test_match_path_exclude_round_trips_shared_ids(root):
+    # The edit-gate dedup loop: MATCHED-IDS emits display ids (numeric for
+    # legacy entries, writer:seq for spool entries) and --exclude must accept
+    # the very same tokens back. One legacy hazard + one spool hazard, both
+    # keyed to the same path, excluded one at a time.
+    run(root, "note", "-p", "acme", "-t", "gotcha",
+        "payments parser mangles unicode headers",
+        "--subsystem", "payments", expect=0)
+    run(root, "share", "--scope", "acme", expect=0)
+    run(root, "note", "-p", "acme", "-t", "gotcha",
+        "rounding bug in the payments export step",
+        "--subsystem", "payments", writer="alice", expect=0)
+
+    r = run(root, "hazards", "--scope", "acme",
+            "--match-path", "src/payments/export.py", expect=0)
+    assert "MATCHED-IDS:" in r.stdout
+    ids_line = [ln for ln in r.stdout.splitlines()
+                if ln.startswith("MATCHED-IDS:")][0]
+    ids = {t.strip() for t in ids_line.split(":", 1)[1].split(",") if t.strip()}
+    assert ids == {"1", "alice:1"}
+
+    r = run(root, "hazards", "--scope", "acme",
+            "--match-path", "src/payments/export.py",
+            "--exclude", "alice:1", expect=0)
+    assert "alice:1" not in r.stdout
+    assert "#1" in r.stdout  # the legacy hazard still surfaces
+
+    r = run(root, "hazards", "--scope", "acme",
+            "--match-path", "src/payments/export.py",
+            "--exclude", "1,alice:1", expect=0)
+    assert r.stdout.strip() == ""  # both excluded -> silent
+
+
+# ----------------------------------------------------------- writer id safety
+
+def test_safe_writer_lowercases_without_hash():
+    assert brain._safe_writer("Tod") == "tod"
+    assert brain._safe_writer("a-b") == "a-b"
+
+
+def test_safe_writer_distinct_raw_names_never_share_a_spool():
+    a = brain._safe_writer("a/b")
+    b = brain._safe_writer("a b")
+    assert a != b
+    assert a.startswith("a-b-") and b.startswith("a-b-")
