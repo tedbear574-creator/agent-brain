@@ -535,8 +535,11 @@ def _call_tool(name: str, arguments: dict) -> dict:
     global _debt
     tool = TOOLS_BY_NAME.get(name)
     if tool is None:
-        return {"content": [{"type": "text", "text": f"unknown tool: {name}"}],
-                "isError": True}
+        result = {"content": [{"type": "text", "text": f"unknown tool: {name}"}],
+                  "isError": True}
+        if _debt >= _DEBT_THRESHOLD:
+            _append_notice(result)
+        return result
     arguments = arguments or {}
 
     if name == "brain_attest":
@@ -545,7 +548,10 @@ def _call_tool(name: str, arguments: dict) -> dict:
         try:
             script, argv = tool["builder"](arguments)
         except ToolError as e:
-            return {"content": [{"type": "text", "text": str(e)}], "isError": True}
+            result = {"content": [{"type": "text", "text": str(e)}], "isError": True}
+            if _debt >= _DEBT_THRESHOLD:
+                _append_notice(result)
+            return result
         is_error, text = _run_cli(script, argv)
         result = {"content": [{"type": "text", "text": text}], "isError": is_error}
         # A rejected write did not mutate and an over-cap note did not capture —

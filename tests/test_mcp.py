@@ -381,3 +381,18 @@ def test_root_flag_selects_the_instance(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_debt_notice_on_error_paths(client, tmp_path):
+    """A malformed call while in debt still carries the notice (review note)."""
+    board = _make_board(tmp_path)
+    client.call_text("tickets_open", {"root": board, "title": "one"})
+    client.call_text("tickets_open", {"root": board, "title": "two"})
+    # builder-validation error (missing required args) while in debt
+    is_error, text = client.call_text("brain_note", {})
+    assert is_error
+    assert NOTICE in text
+    # unknown tool while in debt
+    is_error, text = client.call_text("no_such_tool", {})
+    assert is_error
+    assert NOTICE in text
