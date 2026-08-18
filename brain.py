@@ -77,6 +77,8 @@ giving per-session capture counts (`brain sessions`) a real denominator.
 """
 from __future__ import annotations
 
+__version__ = "4.0"
+
 import argparse
 import hashlib
 import json
@@ -3217,6 +3219,7 @@ def cmd_doctor(_args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="brain", description=__doc__.splitlines()[0])
+    ap.add_argument("--version", action="version", version=f"brain {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("note", help="append one typed entry")
