@@ -35,6 +35,8 @@ import time
 import urllib.parse
 from datetime import date, datetime
 
+from _common import append_with_retry, home_writer_name, safe_name
+
 # --------------------------------------------------------------------------- #
 # Who am I (the writer id)                                                     #
 # --------------------------------------------------------------------------- #
@@ -48,18 +50,8 @@ def writer_id() -> str:
     """The name of the person (or helper) making a change."""
     override = os.environ.get("TICKETS_WRITER")
     if override and override.strip():
-        return _safe_name(override.strip())
-    home = os.path.expanduser("~")
-    # Split on both slash styles so a Windows-style home path gives the same
-    # answer on any platform (os.path.basename would not).
-    parts = [p for p in re.split(r"[\\/]+", home) if p]
-    return _safe_name(parts[-1] if parts else "") or "unknown"
-
-
-def _safe_name(name: str) -> str:
-    """Keep a writer name usable as a filename (no slashes, spaces, etc.)."""
-    keep = [c if (c.isalnum() or c in "-_.") else "-" for c in name]
-    return "".join(keep).strip("-") or "unknown"
+        return safe_name(override.strip())
+    return safe_name(home_writer_name()) or "unknown"
 
 
 # --------------------------------------------------------------------------- #
@@ -123,16 +115,7 @@ def append_event(root: str, event: dict) -> None:
     writer = event["writer"]
     os.makedirs(_events_dir(root), exist_ok=True)
     line = json.dumps(event, ensure_ascii=False) + "\n"
-    path = _writer_path(root, writer)
-    for attempt in range(5):
-        try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-            return
-        except OSError:
-            if attempt == 4:
-                raise
-            time.sleep(0.1 * (attempt + 1))
+    append_with_retry(_writer_path(root, writer), line)
 
 
 def _iter_raw_events(root: str):
