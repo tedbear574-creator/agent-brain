@@ -41,8 +41,9 @@ CLIs.
   registers are conflict-free under sync by design (per-writer files).
 
 Multi-writer honesty: **tickets and registers are multi-writer**; the **stream
-is single-writer per instance** in v1 (a shared narrative stream is a known open
-problem, deliberately out of scope).
+is single-writer per instance by default**, with an opt-in shared-scope layout
+(`brain share`) when one scope must take appends from several machines on a sync
+folder (`docs/PROTOCOL.md` → *Shared scopes*).
 
 ## Quickstart
 

@@ -80,7 +80,7 @@ field's full series. `export` writes `register.csv` (one row per record,
 latest values; tracked fields get paired `<field>` and `<field> as of`
 columns) and `--history` adds `history.csv` in long format —
 `key, field, as_of, value, writer, ts` — deliberately pivot-table-ready,
-because Excel is the v1 summarization engine. Excel formula guard
+because Excel is the summarization engine. Excel formula guard
 (leading-apostrophe on `=+-@`) and UTF-8 BOM as in tickets.
 
 ## Serve (the interactive register)
@@ -94,7 +94,7 @@ with `correct` behind an explicit control; each tracked field gets a
 "Post <label>" form asking value + as-of; per-record History via
 `GET /api/log`. Full read/write parity with the CLI.
 
-## Out of scope for v1
+## Out of scope
 
 In-tool summarization/pivots (`history.csv` + Excel covers it), cross-register
 joins, schema-migration tooling, any unification refactor with tickets.py.

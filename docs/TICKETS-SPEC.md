@@ -29,7 +29,7 @@ python file.
 ## Store
 
 ```
-<root>/config.json          {"prefix": "ACME-DOC", "name": "Acme TP documentation 2026"}
+<root>/config.json          {"prefix": "ACME-DOC", "name": "Acme TP documentation"}
 <root>/events/<writer>.jsonl
 <root>/board.md, board.html, board.csv   (generated only — never hand-edited)
 ```
