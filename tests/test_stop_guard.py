@@ -39,7 +39,7 @@ def _tool_use(name, **inp):
     return {"type": "tool_use", "name": name, "input": inp}
 
 
-def _run_guard(tmp_path, blocks, session_id="s1"):
+def _run_guard(tmp_path, blocks, session_id="s1", env_extra=None):
     """Drive the hook once. Returns the blocked reason string, or None if allowed."""
     kb = str(tmp_path / "kb")
     os.makedirs(kb, exist_ok=True)
@@ -47,9 +47,13 @@ def _run_guard(tmp_path, blocks, session_id="s1"):
     _write_transcript(transcript, blocks)
     event = {"session_id": session_id, "transcript_path": transcript,
              "stop_hook_active": False}
+    env = _clean_env(BRAIN_ROOT=kb)
+    env.pop("CCDESK_ROLE", None)  # a clean baseline; tests opt in via env_extra
+    if env_extra:
+        env.update(env_extra)
     proc = subprocess.run(
         [sys.executable, GUARD], input=json.dumps(event),
-        capture_output=True, text=True, env=_clean_env(BRAIN_ROOT=kb))
+        capture_output=True, text=True, env=env)
     out = (proc.stdout or "").strip()
     if not out:
         return None
@@ -156,6 +160,30 @@ def test_data_root_write_satisfies(tmp_path):
         _tool_use("Write", file_path="/home/u/kb/stream/demo.log"),
     ])
     assert reason is None
+
+
+# --------------------------------------------------------------------------- #
+# Role gate + honest remedy text                                              #
+# --------------------------------------------------------------------------- #
+def test_delegated_role_is_exempt(tmp_path):
+    """A delegated worker (role env set) carries no capture duty — the
+    reviewing dispatcher does — so a substantive session does not block."""
+    reason = _run_guard(tmp_path, [
+        _tool_use("Write", file_path="/home/u/engagement/report.docx"),
+    ], env_extra={"CCDESK_ROLE": "executor"})
+    assert reason is None
+
+
+def test_remedy_text_names_only_real_commands(tmp_path):
+    """The block prompt must name only real brain CLI verbs. `brain attest` is
+    NOT a subcommand (argparse error) — it must never be suggested as a shell
+    command."""
+    reason = _run_guard(tmp_path, [
+        _tool_use("Write", file_path="/home/u/engagement/report.docx"),
+    ])
+    assert reason is not None
+    assert "attest" not in reason.lower()
+    assert "brain" in reason.lower() and "note" in reason.lower()
 
 
 if __name__ == "__main__":
