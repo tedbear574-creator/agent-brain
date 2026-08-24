@@ -1,22 +1,19 @@
-# tickets — spec (ratified 2026-08-16, global stream #123–#127)
+# tickets — spec
 
 Multi-writer ticket board: append-only per-writer event logs + a deterministic
-fold. Formalizes the assistant agenda/dispatch split into one system that also
-deploys standalone at work (OneDrive-synced shared folders, non-technical
-colleagues driving it through their own Claude sessions). Sibling of `gkb.py`:
-same philosophy (typed append-only stream, generated views, no model anywhere
-in the read path).
+fold. Deploys standalone (OneDrive-synced shared folders, non-technical
+colleagues driving it through their own Claude sessions) as one stdlib-only
+python file.
 
-## Constraints (ratified, do not relitigate)
+## Constraints
 
 - **One file per writer, forever.** OneDrive conflict-copies corrupt
   multi-writer files; a single-writer file can only sync late, never fork.
   Locally (git-managed roots) concurrent appends to one file are fine —
-  append mode + short retry, same as gkb.py's stream write.
+  append mode + short retry.
 - **Writer id is derived, never manually set.** Basename of the user profile
   dir (`C:\Users\jsmith` → `jsmith`). `TICKETS_WRITER` env may override
-  (agents), but nothing ever *requires* setting it — manual identifiers were
-  skipped in practice and defaults clobbered.
+  (agents), but nothing ever *requires* setting it.
 - **Single stdlib-only python file** (`tickets.py`, py3.10+), deployed by
   copying the file. No git dependency in any code path.
 - **Closure is never silent about evidence.** `close` hard-requires
@@ -46,28 +43,27 @@ three prefixes), never generic.
 **Per-ticket prefix** (multi-project boards, e.g. the hub): a ticket may
 carry its own short code (`open --prefix`, `edit --prefix`; blank reverts to
 the board's), stored on the event, uppercased for display. A board whose
-tickets all read the same prefix disambiguates nothing (user ruling
-2026-08-16). **Each prefix numbers from 1 independently.** A ticket's
-effective prefix is its own when set, else the board's; `propose_n` at `open`
-= max number among live+closed tickets *sharing that effective prefix*, + 1.
-So the first ticket under a new code is `CODE-1` even on a board that already
-holds tickets under other codes. `edit --prefix` keeps the ticket's number
-when that number is free in the target code's space, otherwise the event
-carries the next free number there and the fold applies it (the CLI prints
-the resulting key either way). The permanent hex id never changes and is the
-reference that always resolves. Resolution: a full key `PREFIX-n` matches
-within that prefix's space; a bare `n` matches the board's own prefix first,
-then — if unique board-wide — any single ticket carrying it, and errors with
-the candidate keys when several prefixes share the number.
+tickets all read the same prefix disambiguates nothing. **Each prefix numbers
+from 1 independently.** A ticket's effective prefix is its own when set, else
+the board's; `propose_n` at `open` = max number among live+closed tickets
+*sharing that effective prefix*, + 1. So the first ticket under a new code is
+`CODE-1` even on a board that already holds tickets under other codes.
+`edit --prefix` keeps the ticket's number when that number is free in the
+target code's space, otherwise the event carries the next free number there
+and the fold applies it (the CLI prints the resulting key either way). The
+permanent hex id never changes and is the reference that always resolves.
+Resolution: a full key `PREFIX-n` matches within that prefix's space; a bare
+`n` matches the board's own prefix first, then — if unique board-wide — any
+single ticket carrying it, and errors with the candidate keys when several
+prefixes share the number.
 
 ## Events
 
 One JSON object per line: `{"ts": ISO-8601 seconds, "writer": str,
 "verb": str, "id": hash, ...}` where `id` is the canonical ticket identity —
-8 lowercase hex chars, random at `open`, carried by every later event.
-(Widened from 6 after review: two writers minting offline must not collide;
-if the near-impossible collision happens anyway the fold warns loudly and
-keeps the first — silent loss is never allowed.)
+8 lowercase hex chars, random at `open`, carried by every later event (two
+writers minting offline must not collide; if a collision ever happens anyway
+the fold warns loudly and keeps the first — silent loss is never allowed).
 
 Verbs: `open` (title, propose_n, optional owner/due/notes/prefix), `claim`
 (owner ← writer unless `--owner`), `block` (reason), `reopen`, `close`
@@ -85,33 +81,39 @@ free number in the ticket's effective-prefix space); if two tickets proposed
 the same number **under the same prefix**, the later one (by replay order)
 keeps the number **with a letter suffix** (`5` and `5b`) — nothing is ever
 renumbered to a different number, so a clash between two tickets can never
-move a third. The same number under two different prefixes is not a clash and
-takes no suffix. An old board numbered board-wide folds to identical keys:
-board-wide allocation left no `(prefix, n)` pair duplicated, so folding its
-events under the per-prefix rule yields exactly the same numbers (no
-migration, events are never rewritten). (Replaced "loser takes next free" after
-review: next-free assignment cascades when a late-syncing earlier-timestamp
-ticket arrives — its victim steals the next number, whose owner steals the
-next, and so on. Suffixes make the blast radius exactly the colliding
-ticket, and even it keeps its numeral.) Residual, documented: a ticket's key
-can *gain* a suffix when a colliding earlier ticket syncs in late; mutating
-verbs echo the resolved key + title so a mis-typed key is visible. Status
-derivation: open → claimed (has owner) → blocked / closed; `block` records
-its reason in a dedicated field (never clobbering notes), `reopen` clears
-it. Later `edit` wins per field.
+move a third (next-free assignment would cascade through every later ticket
+as late-syncing arrivals land; suffixes make the blast radius exactly the
+colliding ticket, and even it keeps its numeral). The same number under two
+different prefixes is not a clash and takes no suffix; an old board numbered
+board-wide folds to identical keys under the per-prefix rule. Residual,
+documented: a ticket's key can *gain* a suffix when a colliding earlier
+ticket syncs in late; mutating verbs echo the resolved key + title so a
+mis-typed key is visible. Status derivation: open → claimed (has owner) →
+blocked / closed; `block` records its reason in a dedicated field (never
+clobbering notes), `reopen` clears it. Later `edit` wins per field.
 
 ## CLI
 
-`open, claim, close, block, reopen, edit, update, comment, show, board,
-page, export, log, init`. The served page has full read and write parity
-with the CLI: every verb is a button/form, and a per-ticket History view
-(GET `/api/log?ticket=`) renders the same lines as `tickets log`. Every ticket argument accepts bare `n`, `PREFIX-n`, or
-the hash. `board`: terminal table (key, title, owner, due, status), sorted
-due-first with overdue flagged, closed hidden unless `--all`. `page`: fully
-regenerate `board.md` + `board.html` (self-contained inline CSS, no external
-assets, readable on any machine). `export`: `board.csv`, Excel-friendly
-(UTF-8 BOM; cells starting `=`/`+`/`-`/`@` get a leading apostrophe so Excel
-never runs them as formulas). `log TICKET`: the event history, human-readable.
+`open, claim, close, block, reopen, edit, update, comment, show, board, view,
+serve, page, export, log, init`. Every ticket argument accepts bare `n`,
+`PREFIX-n`, or the hash. `board`: terminal table (key, title, owner, due,
+status), sorted due-first with overdue flagged, closed hidden unless `--all`.
+`view`: open the up-to-date board in a browser. `page`: fully regenerate
+`board.md` + `board.html` (self-contained inline CSS, no external assets,
+readable on any machine). `export`: `board.csv`, Excel-friendly (UTF-8 BOM;
+cells starting `=`/`+`/`-`/`@` get a leading apostrophe so Excel never runs
+them as formulas). `log TICKET`: the event history, human-readable.
+
+### serve (the interactive board)
+
+Tiny web server on this machine only (127.0.0.1): per-run token in the URL +
+Origin allowlist, writer derived server-side, all writes through the same
+action core as the CLI, one action at a time across parallel browser threads.
+Full read/write parity with the CLI: every verb is a button/form, and a
+per-ticket History view (`GET /api/log?ticket=`) renders the same lines as
+`tickets log`. Self-closing: the page heartbeats `/api/ping`, says goodbye on
+tab close, and an idle watchdog shuts the server down when the last tab goes
+quiet. `--no-open` suppresses auto-opening the browser.
 
 ## Tests + gate
 
@@ -120,8 +122,3 @@ same board); propose_n collision race renumbers only the loser; close without
 source rejected with the attestation hint; writer derivation + env override;
 id resolution (n / PREFIX-n / hash); page + csv generation; reopen/edit
 semantics. Gate: `python -m pytest tests/test_tickets.py -q`.
-
-## Out of scope for the build
-
-gkb.py, agenda.md, dispatch.md, hooks, wake integration — migration and the
-doc sweep happen at the hub after merge.
