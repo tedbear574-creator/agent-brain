@@ -19,8 +19,8 @@ store:
 
 The distinction that makes it work: **a defect you would fix is a ticket, not a
 note; a fact the next session must know is a note; a repeated structured record
-is a register.** Three classes, three homes (`docs/PROTOCOL.md` has the full
-routing rules).
+is a register.** (`docs/PROTOCOL.md` is the canonical protocol — routing rules,
+write rules, retrieval, enforcement.)
 
 ## Why it's different
 
@@ -30,14 +30,6 @@ embeddings, no similarity search anywhere), and **explicit lifecycle**
 (supersede, resolve, retire). Knowledge lives in plain text; intelligence lives
 in the harness; the glue is thin and enumerable — six Claude Code hooks and three
 CLIs.
-
-## Three-class routing
-
-| Class | Home | Example |
-|---|---|---|
-| **Pin** | `invariant --pin`, verbatim at the top of every wake | "the auth token lives in env var X, never in code" |
-| **Stream** | a typed `note`, retrieved on demand | a decision + why, a gotcha, an abandoned approach, an open question |
-| **Register** | a `registers` table with `--root <dir>` | one row per client, per document, per expense |
 
 ## Two deployment profiles
 
@@ -67,7 +59,7 @@ python tickets.py open "fix the flaky test" --root ./boards/work
 
 Point any tool at a different instance with `BRAIN_ROOT` (for `brain`) or
 `--root` (for `tickets`/`registers`). No pip installs, no compiled dependencies —
-Python 3.9+ standard library only.
+Python 3.10+ standard library only.
 
 ### Full install (data root + Claude Code hooks)
 
@@ -157,13 +149,6 @@ stable — treated as a contract, not an implementation detail. Generated files
 render, `brain rebuild --all` regenerates everything from the stream. There
 are no migrations to run, because the one non-regenerable artifact — the
 stream — is never rewritten.
-
-## Coming from an existing documentation system
-
-Read [`docs/TRANSITION.md`](docs/TRANSITION.md): a seeding guide for moving a
-project that already documents itself another way (wiki, README stack, agent
-instruction files) onto the brain — what to seed, what to deliberately leave
-as documents, and why bulk-importing is the one way to do it wrong.
 
 ## Layout
 
