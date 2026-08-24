@@ -1,4 +1,4 @@
-# registers.py — generic record store (ratified spec)
+# registers.py — generic record store
 
 A register holds repeated records of one declared shape: an entity master, an
 interview index, an employee list. **The engine is code; the shape is data** —
@@ -96,9 +96,8 @@ with `correct` behind an explicit control; each tracked field gets a
 
 ## Out of scope for v1
 
-In-tool summarization/pivots (that's `history.csv` + Excel; revisit on
-verbalized wishes), cross-register joins, schema-migration tooling, any
-unification refactor with tickets.py.
+In-tool summarization/pivots (`history.csv` + Excel covers it), cross-register
+joins, schema-migration tooling, any unification refactor with tickets.py.
 
 ## Tests + gate
 
