@@ -156,8 +156,8 @@ the default `brain/` folder — none hardcode a path. All injection hooks honor
   resolve`/`brain attest` or wrote inside the data root; even a trivial change is
   one line. Files created via shell heredocs are a known blind spot: substance is
   read from Write/Edit tool calls. `BRAIN_NO_STOP_GUARD=1` exempts a delegated worker.
-- **PreToolUse `kb_write_authority.py`** — denies writes into the data root from
-  a delegated worker (`BRAIN_DELEGATE=1`): the stream is single-writer per instance.
+- **PreToolUse `kb_write_authority.py`** — denies data-root writes by a delegated
+  worker (`BRAIN_DELEGATE=1`): the stream is single-writer per instance.
 - **SessionEnd `kb_session_log.py`** — appends one observational audit line per
   session under `_state/`.
 
@@ -243,12 +243,11 @@ read/write path. Sharing cannot be undone: the frozen log guarantees legacy id s
 
 **Ids never move.** A legacy entry keeps its numeric id (`7`) — the frozen file makes
 it permanent; a spool entry's id is `<writer>:<seq>`, its 1-based line number in that
-writer's own spool — append-only, so stable forever. Display order is the fold:
-entries sorted by `(write-ts, writer, seq)`, legacy first on a tie. A late-arriving
-synced spool may interleave a row earlier or later, but no id ever changes — order is
-display, id is identity. Everything referencing an entry (`--supersedes`, `resolve`,
-pins, the hazard index) accepts both id forms; a cross-writer ref is stored verbatim
-(`sup=alice:3,7`).
+writer's own spool — append-only, so stable forever. Display order is the fold: entries
+sorted by `(write-ts, writer, seq)`, legacy first on a tie. A late-arriving synced spool
+may interleave a row earlier or later, but no id ever changes — order is display, id is
+identity. Everything referencing an entry (`--supersedes`, `resolve`, pins, the hazard
+index) accepts both id forms; cross-writer refs are stored verbatim (`sup=alice:3,7`).
 
 **Fold is deterministic and read-side.** The same set of files produces the same
 fold on every machine with no coordination. All read paths (wake, hazards, design,
