@@ -53,6 +53,33 @@ def test_wire_settings_backs_up_and_writes(tmp_path):
     assert backups, "a backup must be written before mutating settings.json"
 
 
+def test_copy_hooks_is_idempotent_and_reports_changes(tmp_path):
+    dest = tmp_path / "hooks"
+    # First run: all six land and are reported as changed.
+    first = install.copy_hooks(str(dest))
+    assert set(first) == set(install.HOOK_FILES)
+    for script in install.HOOK_FILES:
+        assert (dest / script).exists()
+        assert (dest / script).read_bytes() == \
+            (open(os.path.join(install.HOOKS_DIR, script), "rb").read())
+    # Second run over the same install: nothing differs, nothing reported.
+    assert install.copy_hooks(str(dest)) == []
+    # A drifted copy is re-synced and reported; the others stay quiet.
+    (dest / "kb_stop_guard.py").write_text("drifted\n", encoding="utf-8")
+    assert install.copy_hooks(str(dest)) == ["kb_stop_guard.py"]
+
+
+def test_write_hooks_config_points_copied_hooks_at_root_and_cli(tmp_path):
+    dest = tmp_path / "sub" / "hooks"
+    dest.mkdir(parents=True)
+    install.write_hooks_config(str(dest), root=str(tmp_path / "data"), name="demo")
+    # The copied hooks resolve config from <parent-of-hooks-dir>/brain.config.json.
+    cfg_path = tmp_path / "sub" / "brain.config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert cfg["cli"] == install.BRAIN_PY
+    assert os.path.abspath(cfg["root"]) == os.path.abspath(str(tmp_path / "data"))
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))

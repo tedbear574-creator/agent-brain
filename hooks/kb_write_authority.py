@@ -2,11 +2,12 @@
 """PreToolUse hook — only the session that owns a work item writes to the brain.
 
 The Agent Brain stream is single-writer per instance (SPEC § Deployment
-profiles). A delegated worker runs with ``BRAIN_DELEGATE=1``: its context is a
-brief, not the whole project, so a stream entry written from two layers down is
-unattributable and usually wrong — it records what one sub-task did, not what
-the change means, and the session that actually owns the work item then can't
-tell its own state from a delegate's guess.
+profiles). A delegated worker runs with ``BRAIN_DELEGATE=1`` or with the
+deployment's role env set to ``executor`` (a loop lane, fusion panelist, verify
+turn): its context is a brief, not the whole project, so a stream entry written
+from two layers down is unattributable and usually wrong — it records what one
+sub-task did, not what the change means, and the session that actually owns the
+work item then can't tell its own state from a delegate's guess.
 
 This is the write half of the single-writer rule: it denies
 Write/Edit/NotebookEdit whose path lands inside the data root when the session
@@ -18,23 +19,25 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kb_card_inject import KB_ROOT  # noqa: E402
+from kb_card_inject import KB_ROOT, role_value  # noqa: E402
 
 DATA_ROOT_MARKER = (os.path.basename(os.path.normpath(KB_ROOT)) or "brain").lower()
 WRITE_TOOLS = {"Write", "Edit", "NotebookEdit", "MultiEdit"}
 
 REASON = (
-    "Blocked: delegated workers don't write to the brain. This session is "
-    "BRAIN_DELEGATE=1 — its context is a brief, not the whole project, so a "
-    "stream entry from here is unattributable (single-writer rule). Put what you "
-    "learned in your final output instead: the session that owns the work item "
-    "records it, and that session is the one that can tell whether it's true of "
-    "the project as a whole."
+    "Blocked: delegated workers don't write to the brain. This session is a "
+    "delegate — its context is a brief, not the whole project, so a stream entry "
+    "from here is unattributable (single-writer rule). Put what you learned in "
+    "your final output instead: the session that owns the work item records it, "
+    "and that session is the one that can tell whether it's true of the project "
+    "as a whole."
 )
 
 
 def _is_delegate() -> bool:
-    return bool((os.environ.get("BRAIN_DELEGATE") or "").strip())
+    if (os.environ.get("BRAIN_DELEGATE") or "").strip():
+        return True
+    return role_value().lower() == "executor"
 
 
 def _targets_brain(tool_input: dict) -> bool:

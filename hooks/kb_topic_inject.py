@@ -26,7 +26,10 @@ Bounded and non-noisy, the same way the hazard gate is:
   - Hard char budget with an explicit overflow pointer (invariant #31).
 
 Sentinels (`topic-inject-<session>`) are GC'd after 7 days, same scheme as
-kb_hazard_inject and kb_stop_guard. BRAIN_NO_INJECT=1 suppresses everything.
+kb_hazard_inject and kb_stop_guard. Delegated workers (the role env) are skipped
+— a delegate's context is its brief, and unlike file-keyed hazards, a topic
+match on the dispatcher's prose is exactly the ambient identity the role gate
+exists to keep out. BRAIN_NO_INJECT=1 suppresses everything.
 
 Always exits 0; on any failure it injects nothing rather than blocking the turn.
 """
@@ -38,7 +41,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kb_card_inject import BRAIN_CLI, CACHE_DIR as _CACHE_DIR  # noqa: E402
+from kb_card_inject import BRAIN_CLI, CACHE_DIR as _CACHE_DIR, role_is_delegated  # noqa: E402
 
 CACHE_DIR = os.environ.get("BRAIN_HAZ_CACHE") or _CACHE_DIR
 SENTINEL_MAX_AGE_S = 7 * 24 * 3600
@@ -79,7 +82,7 @@ def _write_seen(sentinel: str, ids: set[str]) -> None:
 
 
 def main() -> None:
-    if os.environ.get("BRAIN_NO_INJECT"):
+    if os.environ.get("BRAIN_NO_INJECT") or role_is_delegated():
         return
     try:
         data = json.load(sys.stdin)
