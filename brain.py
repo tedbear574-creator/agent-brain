@@ -80,7 +80,6 @@ from __future__ import annotations
 __version__ = "4.0"
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -90,6 +89,8 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+
+from _common import append_with_retry, home_writer_name, safe_name
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -345,22 +346,11 @@ def _is_shared(scope: str) -> bool:
 
 
 def _safe_writer(name: str) -> str:
-    """Keep a writer id usable as a filename (mirrors tickets.py _safe_name).
-
-    Lowercased, so an id reads identically everywhere ids are compared after
-    lowercasing (recall --exclude, the injection hooks). When sanitizing had to
-    replace characters, a short hash of the original is appended: two distinct
-    raw names ('a/b' and 'a b') must never silently share one spool file —
-    that would reintroduce the same-file concurrent appends spools exist to
-    prevent."""
-    raw = name.lower()
-    cleaned = "".join(c if (c.isalnum() or c in "-_.") else "-" for c in raw)
-    cleaned = cleaned.strip("-")
-    if not cleaned:
-        return "unknown"
-    if cleaned != raw:
-        cleaned += "-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:4]
-    return cleaned
+    """Keep a writer id usable as a filename. Lowercased (so an id reads
+    identically everywhere ids are compared after lowercasing — recall
+    --exclude, the injection hooks) and hashed on change (two distinct raw names
+    'a/b' and 'a b' must never silently share one spool file)."""
+    return safe_name(name, lower=True, hash_on_change=True)
 
 
 def _writer_id() -> str:
@@ -374,9 +364,7 @@ def _writer_id() -> str:
     cfg = _load_config().get("writer")
     if cfg and str(cfg).strip():
         return _safe_writer(str(cfg).strip())
-    home = os.path.expanduser("~")
-    parts = [p for p in re.split(r"[\\/]+", home) if p]
-    return _safe_writer(parts[-1] if parts else "") or "unknown"
+    return _safe_writer(home_writer_name()) or "unknown"
 
 
 def _read_file_lines(path: str) -> list[str]:
@@ -986,15 +974,7 @@ def cmd_note(args) -> int:
     else:
         path = _scope_path(scope)
         commit_paths = [f"stream/{scope}.log", f"tree/{scope}"]
-    for attempt in range(5):
-        try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-            break
-        except OSError:
-            if attempt == 4:
-                raise
-            time.sleep(0.1 * (attempt + 1))
+    append_with_retry(path, line)
     # Re-fold after the write: the new entry's display position (and, for a shared
     # scope, its stable id) is read back from the fold, never assumed.
     new_ids = _ids_for(scope)
