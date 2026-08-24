@@ -37,7 +37,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kb_card_inject import KB_ROOT, CACHE_DIR, BRAIN_CLI  # noqa: E402
+from kb_card_inject import KB_ROOT, CACHE_DIR, BRAIN_CLI, role_is_delegated  # noqa: E402
 
 # Writes inside the data root count as persistence, not project code. Match on
 # the resolved root's basename so a synced/relocated instance still matches.
@@ -47,13 +47,15 @@ WRITE_TOOLS = {"Write", "Edit", "NotebookEdit", "write", "edit"}
 SHELL_TOOLS = {"Bash", "PowerShell", "bash", "powershell"}
 
 # Inline capture is the protocol. `brain resolve` also counts — retiring a
-# hazard is capture too — and `brain attest` is the sanctioned "nothing to
-# capture" exit. Matches `brain note`, `brain.py note`, or a full path to
-# brain.py followed by note/resolve/attest.
-BRAIN_NOTE_RE = re.compile(r"brain(?:\.py)?[\"']?\s+(note|resolve|attest)\b",
+# hazard is capture too. Matches `brain note`, `brain.py note`, or a full path
+# to brain.py followed by note/resolve. (`attest` is NOT a brain CLI subcommand
+# — it exists only as the MCP tool below, so it must never appear as a shell
+# verb the session is told to run.)
+BRAIN_NOTE_RE = re.compile(r"brain(?:\.py)?[\"']?\s+(note|resolve)\b",
                            re.IGNORECASE)
-# The same capture verbs reached through the MCP server show up as tool_use
-# blocks whose name ends in brain_note / brain_resolve / brain_attest.
+# The MCP server also exposes the capture verbs as tool_use blocks whose name
+# ends in brain_note / brain_resolve / brain_attest. brain_attest is the
+# sanctioned "nothing to capture" exit — a real MCP tool, unlike the CLI.
 CAPTURE_TOOL_SUFFIXES = ("brain_note", "brain_resolve", "brain_attest")
 # A session has substance if it ran a MUTATING board/register command. Verbs
 # that change stored data (not the read-only board/show/view/log/export/init).
@@ -205,8 +207,14 @@ def _check_brain_note(transcript: list) -> bool:
 
 
 def main():
-    # A session may opt a delegated worker out of the capture duty by setting
-    # BRAIN_NO_STOP_GUARD (the reviewing/dispatching session carries it instead).
+    # Role gate: a delegated worker (issue owner, loop lane, fusion, verify)
+    # carries no capture obligation — the reviewing dispatcher does. A
+    # guard-blocked stop would also race the dispatcher's done-marker: the
+    # parent reads a report while the child keeps working.
+    if role_is_delegated():
+        sys.exit(0)
+    # A session may also opt out explicitly via BRAIN_NO_STOP_GUARD (the
+    # reviewing/dispatching session carries it instead).
     if os.environ.get("BRAIN_NO_STOP_GUARD"):
         sys.exit(0)
 
@@ -256,7 +264,6 @@ def main():
         "<decision|milestone|gotcha|invariant|question|papercut> \"one line\"` "
         "for each memorable thing (scope = project slug; gotcha/invariant also "
         "require --subsystem <label>; `brain resolve` for a fixed hazard also counts). "
-        "If there is genuinely nothing to capture, attest it instead. "
         "A defect you would fix belongs on the ticket board (tickets.py), not in a note. "
         "Even a trivial change is one line."
     )
