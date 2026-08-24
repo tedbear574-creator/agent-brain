@@ -63,10 +63,14 @@ def _run_guard(tmp_path, blocks, session_id="s1", env_extra=None):
 # --------------------------------------------------------------------------- #
 # Fires                                                                        #
 # --------------------------------------------------------------------------- #
-def test_docx_only_edit_session_fires(tmp_path):
+@pytest.mark.parametrize("tool, file_path", [
+    ("Write", "/home/u/engagement/report.docx"),
+    ("Edit", "/home/u/work/model.xlsx"),
+])
+def test_document_only_edit_session_fires(tmp_path, tool, file_path):
     """A document-only engagement (no code) still carries the capture duty."""
     reason = _run_guard(tmp_path, [
-        _tool_use("Write", file_path="/home/u/engagement/report.docx"),
+        _tool_use(tool, file_path=file_path),
     ])
     assert reason is not None and "capture" in reason.lower()
 
@@ -78,13 +82,6 @@ def test_board_mutation_only_session_fires(tmp_path):
                   '--source person:me'),
     ])
     assert reason is not None and "capture" in reason.lower()
-
-
-def test_xlsx_edit_fires(tmp_path):
-    reason = _run_guard(tmp_path, [
-        _tool_use("Edit", file_path="/home/u/work/model.xlsx"),
-    ])
-    assert reason is not None
 
 
 # --------------------------------------------------------------------------- #
