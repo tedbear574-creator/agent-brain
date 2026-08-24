@@ -56,11 +56,10 @@ There are three homes for a durable fact, and the class decides the home:
 0. **Route before you write.** Would you dispatch a fix for it today? → put it on
    the **ticket board** (`tickets.py open ... --root <board>`), NOT a note; the
    board is the one home for a fixable defect. Must the next session know it to
-   work correctly? → `gotcha`. Neither, but it cost you time? → `papercut`. A
-   note describing a defect you intend to fix is misfiled — the CLI's fix-language
-   gate catches the obvious cases (`--force-type` overrides), but compressing to
-   fit the cap can strip the very words it matches on, so decide the route first
-   and write second.
+   work correctly? → `gotcha`. Neither, but it cost you time? → `papercut`. A note
+   describing a defect you intend to fix is misfiled — the CLI's fix-language gate
+   catches the obvious cases (`--force-type` overrides), but compressing to fit the
+   cap can strip the very words it matches on: decide the route first, write second.
 1. **Capture inline, the moment it lands** — not at session end:
    `python brain.py note --project <scope> --type <T> "one line"`.
    Standing entries (`gotcha`/`invariant`) **require** `--subsystem "label"` — the
@@ -74,12 +73,11 @@ There are three homes for a durable fact, and the class decides the home:
    identical text re-dates it (`brain lint` flags invariants unconfirmed for over
    120 days).
 2. **One fact per entry, inside its cap.** Capture what the diff can't tell you:
-   the decision and its why, the gotcha, the abandoned approach, the open
-   question. Never replay a diff. **Reasoning that will not fit belongs in a deep
-   doc** under the data root (e.g. `projects/<scope>/<topic>.md`) — the deep doc
-   holds the model, the derivation, the ledger; the entry holds the ruling and
-   points at it. Compressing an argument until it reads as shorthand loses the
-   part worth keeping. `brain wake` names a scope's deep docs.
+   the decision and its why, the gotcha, the abandoned approach, the open question.
+   Never replay a diff. **Reasoning that will not fit belongs in a deep doc** under
+   the data root (e.g. `projects/<scope>/<topic>.md`) — the doc holds the model,
+   derivation, ledger; the entry holds the ruling and points at it. Compressing an
+   argument into shorthand loses the part worth keeping. `brain wake` names deep docs.
 3. **Supersede, don't edit.** Stale or wrong entry → `brain note --supersedes N`
    with the corrected fact; it drops out of the summary/index path. Fixed a known
    gotcha → `brain resolve --project <scope> N "how"` (records a milestone +
@@ -106,35 +104,32 @@ There are three homes for a durable fact, and the class decides the home:
 - `brain wake --scope <s>` — root state + newest raw tail + pull map (the session-start injection).
 - `brain hazards --scope <s> [--grep RX]` — live hazard index; BEFORE touching a subsystem.
 - `brain design --scope <s> [--grep RX]` — live invariants; BEFORE redesigning one.
-- `brain lint [--scope <s>]` — deterministic integrity audit: provenance citations resolve
-  live, supersession chains acyclic, label near-duplicates, view budgets, user-model budget.
+- `brain lint [--scope <s>]` — deterministic integrity audit: provenance resolves live, supersession acyclic, label near-duplicates, view budgets.
 - `brain grep RX [--scope <s>]` — raw search across streams.
 - `brain zoom <s> <lo>-<hi>` — raw entries for a range (drill below a branch gist).
 - `brain decisions|milestones|questions|gotchas --scope <s> [-n N]` — typed lists.
 - `brain papercuts [--scope <s>]` — open papercuts clustered by recurrence.
-- `brain recall "<text>"` — live rulings across scopes bearing on a topic, verbatim
-  (what the conversational hook pushes; run it by hand when you want more than it surfaced).
+- `brain recall "<text>"` — live rulings across scopes bearing on a topic, verbatim (what the conversational hook pushes; run it by hand for more than it surfaced).
 - `brain branches <s>` / `brain status` — tree shape / store health.
 - `brain history "<query>"` — the un-curated transcript archive (pull-only).
-- Cross-scope coupling: a scope card's `affects:` key names the scopes a change touches —
-  grep card frontmatter to find them.
+- Cross-scope coupling: a scope card's `affects:` key names coupled scopes — grep card frontmatter.
 
 ## Enforcement (two layers)
 
 Enforcement lives in the ENGINE so every surface gets the discipline; the hooks
 are accelerators for one surface, not the mechanism. It is NEVER a wall: no write
-is ever blocked and no session is ever refused service — enforcement is notices
-and obligations. Both layers run the SAME capture-or-attest contract: capture
-what the diff can't tell, or attest that there is genuinely nothing.
+is blocked, no session refused service — enforcement is notices and obligations.
+Both layers run the SAME capture-or-attest contract: capture what the diff can't
+tell, or attest that there is genuinely nothing.
 
-**Engine-side (every MCP surface — the desktop app and any other non-hook
-client).** The MCP server (`brain_mcp.py`) is a per-session process, so it
-carries session state: each mutating board/register call (`tickets_open` /
-`tickets_update` / `tickets_close`, `registers_add` / `registers_post`) accrues
-one unit of *capture debt*; a `brain_note`/`brain_resolve` clears it, and
-`brain_attest` — the sanctioned "nothing to capture" exit — clears it and records
-a one-line reason to `<root>/_state/attest.log`. From two units of debt on, every
-tool result carries an advisory line to capture or attest — never blocking.
+**Engine-side (every MCP surface).** The MCP server (`brain_mcp.py`) is a
+per-session process, so it carries session state: each mutating board/register
+call (`tickets_open` / `tickets_update` / `tickets_close`, `registers_add` /
+`registers_post`) accrues one unit of *capture debt*; a `brain_note`/
+`brain_resolve` clears it, and `brain_attest` — the sanctioned "nothing to
+capture" exit — clears it and records a one-line reason to
+`<root>/_state/attest.log`. From two units of debt on, every tool result carries
+an advisory line to capture or attest — never blocking.
 
 **Hook-side (Claude Code).** The `hooks/` directory holds the Claude Code
 enforcement layer. Every hook resolves the instance from `BRAIN_ROOT` / config /
@@ -142,27 +137,25 @@ the default `brain/` folder — none hardcode a path. All injection hooks honor
 `BRAIN_NO_INJECT=1`. The Stop hook gates on session substance (below).
 
 - **SessionStart `kb_card_inject.py`** — injects the cwd scope's `[BRAIN WAKE]`
-  (root state + newest raw tail + pull map). Scope = the first path component under
-  `BRAIN_PROJECTS_ROOT`, or the directory basename when unset (`BRAIN_SCOPE_ALIASES`,
-  `name=scope,...`, remaps names). Nothing is injected for a scope with no stream.
+  (root state + newest raw tail + pull map). Scope = first path component under
+  `BRAIN_PROJECTS_ROOT`, else the directory basename (`BRAIN_SCOPE_ALIASES`,
+  `name=scope,...`, remaps names); nothing is injected for a stream-less scope.
 - **PostToolUse `kb_hazard_inject.py`** — on a project-code Write/Edit, injects
   the live standing entries keyed to the edited file's path, once per HAZARD per
   session; a first edit matching nothing falls back once to the full standing
   index, budget-bounded — whole subsystem groups ordered by relevance to the edited
   path then recency, overflow degraded to a one-line digest naming labels + entry
-  numbers. Fires for every session: hazards are keyed to files a session actually
-  touches, which no brief author can predict.
+  numbers. Fires for every session (why: *Role-gated injection* below).
 - **UserPromptSubmit `kb_topic_inject.py`** — when a prompt raises a topic that
   live decisions/questions/invariants already speak to, injects those rulings
   verbatim, once per entry per session, silent unless the lexical match is strong
   (it fires on every prompt — precision beats recall).
 - **Stop `kb_stop_guard.py`** — on sessions with substance — a write to any project
-  file (code, docx, xlsx, md — anything outside the data root and the config dir)
-  OR a mutating tickets/registers command — blocks the first stop until the session
-  ran `brain note`/`brain resolve`/`brain attest` or wrote inside the data root;
-  even a trivial change is one line. Files created via shell heredocs are a known
-  blind spot: substance is read from Write/Edit tool calls. `BRAIN_NO_STOP_GUARD=1`
-  exempts a delegated worker.
+  file outside the data root and the config dir, OR a mutating tickets/registers
+  command — blocks the first stop until the session ran `brain note`/`brain
+  resolve`/`brain attest` or wrote inside the data root; even a trivial change is
+  one line. Files created via shell heredocs are a known blind spot: substance is
+  read from Write/Edit tool calls. `BRAIN_NO_STOP_GUARD=1` exempts a delegated worker.
 - **PreToolUse `kb_write_authority.py`** — denies writes into the data root from
   a delegated worker (`BRAIN_DELEGATE=1`): the stream is single-writer per instance.
 - **SessionEnd `kb_session_log.py`** — appends one observational audit line per
@@ -176,48 +169,46 @@ runner treats backslashes as escape sequences.
 Every scope keeps an identity card, `projects/<scope>.md`: full frontmatter (the
 bundle index generator reads it; `affects:` — the cross-project routing key — is
 grepped there) plus a body of pointers only: wake/hazards/capture commands,
-surviving deep docs, repo location. No state in the card body; the stream owns
-state. Copy an existing card when creating one. The lifecycle rides on the card's
-`status:` (`active`, `partial`, `broken`, `parked`, `superseded`) and is recorded
-in the stream as a decision/milestone. Retiring a project moves its repo directory
-into the deployment's archive location — a plain move, never a rewrite of the
-archived copy; stream and card stay forever, and a killed experiment gets a
-`gotcha` saying why, so it does not come back.
+surviving deep docs, repo location — no state; the stream owns state. Copy an
+existing card when creating one. The lifecycle rides on the card's `status:`
+(`active`, `partial`, `broken`, `parked`, `superseded`), recorded in the stream as
+a decision/milestone. Retiring a project moves its repo directory into the
+deployment's archive location — a plain move, never a rewrite; stream and card stay
+forever, and a killed experiment gets a `gotcha` saying why, so it does not come back.
 
 ## The ticket board — all tracked work
 
 The **one sanctioned exception** to "the brain records what is". CLI:
 `tickets.py`; store: per-writer append-only event logs + a deterministic fold —
 the board is computed, never stored, so it is conflict-free under folder sync.
-Every ticket's key carries the prefix of the project it belongs to (`WEB-17`,
-`API-3`), set at `open --prefix`, movable later with `edit --prefix`; each prefix
-numbers independently and the permanent hex id never changes. Owner set = work
-only that person can do; unowned = any session may claim it, and doing it is the
-response, not scheduling it. A due date means an external deadline or a genuinely
-date-gated watch, never a schedule for doable agent work. Closing requires
-`--source`: evidence (doc name, commit, url) or the attestation `person:<writer>`
-— never silent.
+Every ticket's key carries the prefix of its project (`WEB-17`, `API-3`), set at
+`open --prefix`, movable later with `edit --prefix`; each prefix numbers
+independently and the permanent hex id never changes. Owner set = work only that
+person can do; unowned = any session may claim it, and doing it is the response,
+not scheduling it. A due date means an external deadline or a date-gated watch,
+never a schedule for doable agent work. Closing requires `--source`: evidence (doc
+name, commit, url) or the attestation `person:<writer>` — never silent.
 
 ## The assistant layer
 
 Core invariant: **push context by role, pull context by graph.** Interactive
-sessions get identity + scoped injection; delegated workers get their brief only
-— curated by the dispatcher, never ambient identity; everything else is reachable
-on demand and injected never. No store is injected whole into every context, and
-there is no similarity-based retrieval anywhere. The countered anti-pattern:
-automatic writes + similarity recall + no lifecycle — memory that bloats.
+sessions get identity + scoped injection; delegated workers get their brief only —
+curated by the dispatcher, never ambient identity; everything else is reachable on
+demand and injected never. No store is injected whole into every context, no
+similarity-based retrieval anywhere; countered anti-pattern: automatic writes +
+similarity recall + no lifecycle.
 
 **Role-gated injection.** Delegates announce themselves with env markers and the
 gates split accordingly: `BRAIN_DELEGATE=1` denies them the data root;
 `BRAIN_NO_STOP_GUARD=1` lifts the capture duty — the dispatching session carries
-it. The hazard gate is the exception and fires for delegates too: hazards are
-keyed to files no brief author can predict, and delegated sessions do the bulky
-edits most likely to re-hit one.
+it. The hazard gate is the exception, firing for delegates too: hazards are keyed
+to files no brief author can predict, and delegates do the bulky edits most likely
+to re-hit one.
 
 ### `user.md` — the user model
 
 The data root may carry `user.md`: a declarative model of the user — role,
-preferences, working style, active threads — at ONE-LINE altitude. No project
+preferences, working style, active threads — at ONE-LINE altitude; no project
 detail (streams own that), no behavioral instructions. Hard budget, enforced by
 `brain lint`: a new fact evicts a weaker one — character sheet, not diary.
 Agent-curated; how it is injected is deployment wiring.
@@ -233,32 +224,30 @@ record, and `brain doctor` says which profile is active.
 
 ## Shared scopes — one scope, many machines
 
-A solo scope is a single append-only file written by one machine; it corrupts if
-two machines on a sync folder (OneDrive, Dropbox) append at once. A **shared
-scope** removes that hazard the way the ticket board does: one spool per writer
-plus a deterministic read-side fold.
+A solo scope is a single append-only file written by one machine; it corrupts if two
+machines on a sync folder (OneDrive, Dropbox) append at once. A **shared scope**
+removes that hazard the way the ticket board does: one spool per writer plus a
+deterministic read-side fold.
 
 **Layout.** A scope is shared iff `stream/<scope>/` exists (a directory):
 `stream/<scope>.log` is the FROZEN legacy history — read forever, appended never —
 and `stream/<scope>/<writer>.log` is one append-only spool per writer. A machine
 writes ONLY its own spool, so no two machines ever touch the same file and nothing
 conflicts on a sync folder. The writer id comes from the `writer` key in
-`brain.config.json`, defaulting to the same derivation `tickets.py` uses (the last
-segment of the home path); `BRAIN_WRITER` overrides it.
+`brain.config.json`, defaulting to the derivation `tickets.py` uses (last segment
+of the home path); `BRAIN_WRITER` overrides it.
 
 **Opt-in, one-way.** `brain share --scope X` freezes `X.log` and creates
-`stream/X/`. Everything else works unchanged — numbering, supersede refs, and
-every read/write path. Sharing cannot be undone: the frozen log is what guarantees
-legacy id stability.
+`stream/X/`. Everything else works unchanged — numbering, supersede refs, and every
+read/write path. Sharing cannot be undone: the frozen log guarantees legacy id stability.
 
-**Ids never move.** A legacy entry keeps its numeric id (`7`) — the frozen file
-makes it permanent; a spool entry's id is `<writer>:<seq>`, its 1-based line number
-in that writer's own spool — append-only, so stable forever. Display order is the
-fold: entries sorted by `(write-ts, writer, seq)`, legacy first on a tie. A
-late-arriving synced spool may interleave a row earlier or later, but no id ever
-changes — order is display, id is identity. Everything that references an entry
-(`--supersedes`, `resolve`, pins, the hazard index, the anti-hit chain walk)
-accepts and stores both id forms; a cross-writer ref is stored verbatim
+**Ids never move.** A legacy entry keeps its numeric id (`7`) — the frozen file makes
+it permanent; a spool entry's id is `<writer>:<seq>`, its 1-based line number in that
+writer's own spool — append-only, so stable forever. Display order is the fold:
+entries sorted by `(write-ts, writer, seq)`, legacy first on a tie. A late-arriving
+synced spool may interleave a row earlier or later, but no id ever changes — order is
+display, id is identity. Everything referencing an entry (`--supersedes`, `resolve`,
+pins, the hazard index) accepts both id forms; a cross-writer ref is stored verbatim
 (`sup=alice:3,7`).
 
 **Fold is deterministic and read-side.** The same set of files produces the same
@@ -266,7 +255,6 @@ fold on every machine with no coordination. All read paths (wake, hazards, desig
 recall, grep, zoom, decisions/…, rebuild, lint, status) consume the fold; all
 write paths append to the current writer's spool only. Caps, the duplicate gate,
 and supersede semantics are unchanged — the dup gate compares against the folded
-live view, and cross-writer supersession is allowed mechanically. `lint` reports a
-supersede ref pointing at an id not present yet (a spool not synced) as a WARNING,
-not an error: sync lag is normal. `brain doctor` names each shared scope's writer
-set and flags any spool whose write timestamps run backwards.
+live view; cross-writer supersession is allowed mechanically. `lint` reports a
+supersede ref pointing at an id not present yet (a spool not synced) as a WARNING:
+sync lag is normal. `brain doctor` names each shared scope's writer set.
