@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """SessionStart hook: inject the current scope's Agent Brain wake state.
 
-When a session starts, this injects, for INTERACTIVE sessions (a delegated
-worker whose role env is set gets nothing ambient — its context is its brief):
+When a session starts, this injects — for INTERACTIVE sessions only (a delegated
+worker whose role env is set gets nothing ambient — its context is its brief) —
+ONLY what is COMPUTED per session, in a fixed order, under ONE hard total budget
+(INJECT_MAX_CHARS). Every static sentence the injection used to carry now lives
+in ~/.claude/CLAUDE.md; this hook adds no instructional prose back.
 
-  1. user.md — the user model, always, regardless of cwd (if the instance has
-     one). Trimmed round-robin across its ## sections so none vanishes whole.
-  2. For scopes with a stream: `brain wake` — root state + newest raw tail + a
-     pull map. For scopes with only a card (a pointer stub for a not-yet-migrated
-     scope): the card's ## Current State / ## Active Blockers.
-  3. The home ticket board (tickets.py): tickets whose due date is today or past.
-  4. inbox.md — phone/desk responses awaiting processing.
+  1. Header + pins — `brain wake --inject`'s section 1: one `[BRAIN scope=…]`
+     line (live rulings / hazards / invariants / total) plus pinned invariants
+     verbatim. Never trimmed. (For a not-yet-migrated card scope: the card's
+     ## Current State / ## Active Blockers instead.)
+  2. [BRAIN USER] — user.md body, 3000-char budget, trimmed round-robin across
+     its ## sections so none vanishes whole.
+  3. [BRAIN BOARD] — the home ticket board (tickets.py): tickets due today or
+     past (rows capped at 8), then one open/unowned/full-board summary line.
+  4. [BRAIN INBOX] — phone/desk responses awaiting processing.
+  5. [BRAIN STATE] — `brain wake --inject`'s section 5: newest live rulings
+     (computed from the stream), trimmed first when over the total budget.
 
 This module also holds the SHARED instance-resolution helpers the other hooks
 import (root/cli/cache/scope/role). Everything is instance-relative: the data
@@ -34,6 +41,7 @@ is silent until it has memory. Always exits 0.
 """
 import datetime
 import json
+import re
 import os
 import subprocess
 import sys
@@ -114,9 +122,10 @@ BRAIN_CLI = resolve_cli()
 # data root's _state/ dir unless BRAIN_CACHE overrides it.
 CACHE_DIR = os.environ.get("BRAIN_CACHE") or os.path.join(KB_ROOT, "_state", "cache")
 
-USER_MAX_CHARS = 3000       # user.md's budget — chars, not lines (lines were gameable)
-MAX_INJECT_CHARS = 3000     # card body cap
-WAKE_MAX_CHARS = 5000       # safety net; `brain wake` is already self-limiting
+USER_MAX_CHARS = 3000       # user.md's section budget — chars, not lines (lines were gameable)
+MAX_INJECT_CHARS = 3000     # card body cap (not-yet-migrated scopes)
+INJECT_MAX_CHARS = 7000     # ONE hard total budget on the whole joined injection
+SEP = "\n\n"                # the join between injected sections
 
 
 def _parse_map(raw) -> dict:
@@ -218,38 +227,52 @@ def _slug_for(cwd):
 
 # --- trimming helpers -------------------------------------------------------
 
-def _trim_wake(out: str, budget: int) -> str:
-    """Trim the ROOT, never the tail. `brain wake` emits root, then `-- ...--`
-    blocks holding the newest raw entries and the pull map — the freshest and
-    most actionable material sits at the END, so a head-first cut discards
-    exactly what should survive."""
-    if len(out) <= budget:
-        return out
-    lines = out.splitlines()
-    marks = [i for i, ln in enumerate(lines) if ln.startswith("-- ")]
-    first = marks[0] if marks else len(lines)
-    head, tail = lines[:first], lines[first:]
-    tail_chars = sum(len(ln) + 1 for ln in tail)
-    if tail_chars >= budget - 120:
-        kept = []
-        for ln in reversed(tail):
-            if sum(len(k) + 1 for k in kept) + len(ln) > budget - 120:
-                break
-            kept.insert(0, ln)
-        return "…(root omitted to fit — `brain wake` for the full state)\n" + "\n".join(kept)
-    room = budget - tail_chars - 160
-    kept_head = []
-    for ln in head:
-        if sum(len(k) + 1 for k in kept_head) + len(ln) > room:
+def _join(parts) -> str:
+    return SEP.join(p for p in parts if p)
+
+
+def _shrink_state(state: str, target: int) -> str:
+    """Shrink section 5 ([BRAIN STATE]) to `target` chars. Drop rulings
+    oldest-first (they render newest-first, so pop from the tail), then drop the
+    other-scopes block. The section header line is always kept."""
+    if len(state) <= target:
+        return state
+    lines = state.split("\n")
+    head, body = lines[0], lines[1:]
+    rulings = [ln for ln in body if ln.startswith("#")]
+    rest = [ln for ln in body if not ln.startswith("#")]
+
+    def build():
+        return "\n".join([head] + rulings + rest)
+
+    while len(build()) > target and rulings:
+        rulings.pop()                       # oldest live ruling first
+    if len(build()) <= target:
+        return build()
+    for idx, ln in enumerate(rest):         # then the cross-scope roll-call
+        if ln.strip().startswith("other scopes with unsummarized entries"):
+            rest = rest[:idx]
             break
-        kept_head.append(ln)
-    dropped = len(head) - len(kept_head)
-    return (
-        "\n".join(kept_head)
-        + f"\n…({dropped} root line(s) trimmed to fit — `brain wake` for all; the newest "
-          "entries and the pull map below are never trimmed)\n"
-        + "\n".join(tail)
-    )
+    return build()
+
+
+def _assemble(header, user, board, inbox, state) -> str:
+    """Join the sections in fixed order under ONE hard total budget. Trim order
+    when over: STATE rulings oldest-first, then STATE other-scopes lines, then
+    USER via _fair_trim. Header + pins, board, and inbox are never trimmed."""
+    parts = [header, user, board, inbox, state]
+    if len(_join(parts)) <= INJECT_MAX_CHARS:
+        return _join(parts)
+    if state:
+        room = INJECT_MAX_CHARS - len(_join([header, user, board, inbox])) - len(SEP)
+        state = _shrink_state(state, max(room, 0))
+    parts = [header, user, board, inbox, state]
+    if len(_join(parts)) <= INJECT_MAX_CHARS:
+        return _join(parts)
+    if user:
+        room = INJECT_MAX_CHARS - len(_join([header, board, inbox, state])) - len(SEP)
+        user, _ = _fair_trim(user, max(room, 0))
+    return _join([header, user, board, inbox, state])
 
 
 def _fair_trim(body: str, budget: int):
@@ -336,31 +359,26 @@ def _extract_sections(text: str, wanted) -> str:
 # --- the four injected parts ------------------------------------------------
 
 def _user_part():
+    """Section 2: the user model. Title only — the '(user.md — agent-curated…)'
+    gloss and the in-body budget reminder are for the CURATOR of user.md, not the
+    reader of the injection, so the file keeps them and the injection drops them."""
     text = _read(USER_MD)
     if not text:
         return None
     body = _strip_frontmatter(text).strip()
+    body = "\n".join(ln for ln in body.split("\n")
+                     if not ln.lstrip().startswith("**Budget:")).strip()
     if not body:
         return None
     if len(body) > USER_MAX_CHARS:
-        over = len(body) - USER_MAX_CHARS
-        body, dropped = _fair_trim(body, USER_MAX_CHARS)
-        if dropped:
-            body += (
-                f"\n\n…({dropped} line(s) withheld — user.md is {over} chars over its "
-                f"{USER_MAX_CHARS}-char budget; the tail of EACH section was trimmed, so "
-                f"every section is represented but none is complete. Hygiene it: evict weak "
-                f"facts, do NOT merge facts onto one line.)"
-            )
-    return (f"[BRAIN USER] User model (user.md — agent-curated, {USER_MAX_CHARS}-char "
-            f"budget):\n\n{body}")
+        body, _ = _fair_trim(body, USER_MAX_CHARS)
+    return f"[BRAIN USER]\n\n{body}"
 
 
-def _ticket_part():
-    """Tickets on the home board (tickets.py) whose due date is today or past.
-    Due-ness is the only filter — no project scoping. Injects nothing if the
-    board root is missing or unreadable (a machine without a board sees silence,
-    never a traceback)."""
+def _board_part():
+    """Section 3: the work board (tickets.py) ONCE — the tickets due or overdue
+    (rows capped at 8), then one summary line. Injects nothing if the board root
+    is missing/unreadable or carries no open work (silence, never a traceback)."""
     if not os.path.isdir(TICKETS_ROOT):
         return None
     try:
@@ -373,21 +391,22 @@ def _ticket_part():
     except Exception:
         return None
     prefix = cfg.get("prefix", "")
-    today = datetime.date.today().isoformat()
-    due = [t for t in state.values()
-           if t["status"] != "closed" and t["due"] and t["due"] <= today]
-    due.sort(key=lambda t: (t["due"], t["n"], t["nsfx"]))
-    if not due:
+    active = [t for t in state.values() if t["status"] != "closed"]
+    if not active:
         return None
-    rows = []
-    for t in due:
+    today = datetime.date.today().isoformat()
+    due = [t for t in active if t["due"] and t["due"] <= today]
+    due.sort(key=lambda t: (t["due"], t["n"], t["nsfx"]))
+    unowned = len([t for t in active if not t["owner"]])
+    board_cmd = f"python {os.path.join(engine_dir, 'tickets.py')} board --root {TICKETS_ROOT}"
+    rows = ["[BRAIN BOARD]"]
+    for t in due[:8]:
         owner = t["owner"] or "nobody yet"
         rows.append(f"- {tickets.key_of(prefix, t)} (due {t['due']}, {owner}) {t['title']}")
-    return (
-        "[BRAIN BOARD] Tickets due or overdue on the work board (tickets.py) — close "
-        "each when done (a close needs a source), or push its due date if it is "
-        "still waiting:\n" + "\n".join(rows)
-    )
+    if len(due) > 8:
+        rows.append(f"   (+{len(due) - 8} more due)")
+    rows.append(f"{len(active)} open · {unowned} unowned · full board: {board_cmd}")
+    return "\n".join(rows)
 
 
 def _inbox_part():
@@ -404,45 +423,31 @@ def _inbox_part():
     )
 
 
-def _wake_part(slug):
+def _wake_inject(slug):
+    """Sections 1 (header + pins) and 5 (computed STATE) from `brain wake
+    --inject`, split on the STATE marker into (header_part, state_part). Returns
+    (None, None) when the scope has no stream. All instructional prose the old
+    injection carried now lives in ~/.claude/CLAUDE.md; the CLI's own error
+    messages teach caps / --subsystem / near-duplicates at the moment they bite."""
     scope = scope_for(slug)
     if not scope_has_stream(scope):
-        return None
+        return None, None
     try:
         r = subprocess.run(
-            [sys.executable, BRAIN_CLI, "wake", "--scope", scope],
+            [sys.executable, BRAIN_CLI, "wake", "--inject", "--scope", scope],
             capture_output=True, timeout=15,
         )
         out = r.stdout.decode("utf-8", errors="replace").strip()
     except Exception:
         out = ""
     if not out:
-        return None
-    return (
-        "[BRAIN WAKE] This scope runs on the Agent Brain stream store (stream + tree), "
-        "not a card. Capture inline the moment a decision, abandoned approach or gotcha "
-        "lands:\n"
-        f"  python \"{BRAIN_CLI}\" note --project {scope} --type "
-        "<decision|milestone|gotcha|invariant|question|papercut> \"one line\"\n"
-        "  Caps: 800 chars for decision/question (they carry the reasoning), 300 for the "
-        "rest. Reasoning that will not fit goes in projects/<scope>/<topic>.md, with the "
-        "ruling noted here pointing at it.\n"
-        "  gotcha and invariant ALSO require --subsystem <label> — it is the hazard "
-        "index's only retrieval axis, so the command fails without it.\n"
-        "Route before you write: a defect you would fix -> a TICKET on the work board "
-        "(tickets.py open, NOT a note); something the next session must know to work "
-        "correctly -> gotcha; neither, but it cost you time -> papercut (duplicates count "
-        "instead of blocking; recurrence is what promotes it to the board).\n"
-        "Starting on a new subject? Pin its identity facts so they load every wake:\n"
-        f"  python \"{BRAIN_CLI}\" note --project {scope} --type invariant --pin "
-        "--subsystem identity \"...\"\n"
-        f"Fixed a known gotcha? Retire it: brain resolve --project {scope} N \"how\".\n"
-        "A near-duplicate of a live entry is rejected: reconcile it with --supersedes N, "
-        "or pass --distinct if it truly is a separate fact.\n"
-        "The state below is orientation only — it is deliberately lossy. Hazards are never "
-        "summarized into it; pull them before touching a subsystem.\n\n"
-        + _trim_wake(out, WAKE_MAX_CHARS)
-    )
+        return None, None
+    # Line-anchored: a pin or ruling may legitimately quote the marker text.
+    m = re.search(r"^\[BRAIN STATE\]", out, flags=re.M)
+    if not m:
+        return out, None
+    idx = m.start()
+    return out[:idx].strip(), out[idx:].strip()
 
 
 def _card_part(slug):
@@ -479,10 +484,13 @@ def main() -> None:
     cwd = data.get("cwd") or os.getcwd()
     slug = _slug_for(cwd)
 
-    context_part = _wake_part(slug) or _card_part(slug)
-    parts = [p for p in (_user_part(), context_part, _ticket_part(), _inbox_part()) if p]
-    if parts:
-        print("\n\n".join(parts))
+    # Fixed order under ONE total budget: header+pins, user, board, inbox, state.
+    header, state = _wake_inject(slug)
+    if header is None:                      # no stream: a not-yet-migrated card scope
+        header = _card_part(slug)
+    out = _assemble(header, _user_part(), _board_part(), _inbox_part(), state)
+    if out:
+        print(out)
 
 
 if __name__ == "__main__":

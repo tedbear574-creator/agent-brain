@@ -55,7 +55,8 @@ Commands:
   dispatch ...                       RETIRED -> tracked work lives on the ticket
                                      board (tickets.py); the stub names the
                                      replacement command
-  wake [--scope X]                   root + newest raw tail + pull map + board
+  wake [--scope X] [--inject]        pins + computed state + pull map + board
+                                     (--inject: header + pins + state only)
   hazards [--scope X] [--grep RX] [--budget N]   LIVE gotchas/dead-ends verbatim
   design  [--scope X] [--grep RX] [--budget N]   LIVE invariants verbatim
   zoom <scope> <lo>-<hi>             raw entries lo..hi (1-based)
@@ -205,6 +206,8 @@ ROOT_MAX_LINES = 28       # root is orientation, not the memory — keep it smal
 WAKE_TAIL_CAP = 12        # newest raw entries wake prints (retention is tail-first)
 WAKE_TAIL_CHARS = 4000    # …and a hard char budget on top, since caps now vary by type
 WAKE_STATE_CHARS = 3500   # char budget for wake's computed state view (live rulings)
+INJECT_STATE_CHARS = 1500 # tighter state budget for `wake --inject` (SessionStart)
+INJECT_CLIP = 200         # per-ruling clip for `wake --inject` (vs 300 for human wake)
 VIEW_DEFAULT_RECENT = 20  # un-narrowed type views cap out; say what was withheld
 
 # The `-` in the value class carries the asof date (YYYY-MM-DD); every other
@@ -1600,19 +1603,23 @@ def cmd_design(args) -> int:
 
 def cmd_wake(args) -> int:
     scope = args.scope or "global"
+    inject = getattr(args, "inject", False)
     entries = _read_entries(scope)
     n = len(entries)
     if not n:
-        print(f"[BRAIN WAKE scope={scope}] empty stream.")
+        if inject:
+            print(f"[BRAIN scope={scope}] 0 live rulings · 0 live hazards "
+                  f"· 0 live invariants · 0 entries total")
+            print()
+            print("[BRAIN STATE] empty stream.")
+        else:
+            print(f"[BRAIN WAKE scope={scope}] empty stream.")
         return 0
     ids = _ids_for(scope)
     dead = _superseded(entries, ids)
     # Pinned identity facts render VERBATIM at the very top, above the computed
     # state — always loaded, never trimmed, never summarized (§3).
     pins = _render_pins(entries, dead, ids)
-    if pins:
-        print(pins)
-        print()
     # State is COMPUTED at wake time, not model-summarized (design ruling
     # 2026-08-16): live rulings straight from the stream, supersede-resolved,
     # verbatim, newest first. It can never be stale and costs no model call;
@@ -1622,6 +1629,22 @@ def cmd_wake(args) -> int:
                   if p and p[1] in ("decision", "question") and i not in dead]
     mile = [(i, p) for i, p in parsed
             if p and p[1] == "milestone" and i not in dead]
+    haz = len([i for i, ln in enumerate(entries, start=1)
+               if _is_hazard(ln) and i not in dead])
+    inv = len([i for i, ln in enumerate(entries, start=1)
+               if (p := _parse(ln)) and p[1] == "invariant" and i not in dead])
+
+    # SessionStart injection: sections 1 (header + pins) and 5 (computed STATE)
+    # ONLY — no pull map, no board, no "other scopes up to date" list. Every
+    # static sentence the injection used to carry now lives in ~/.claude/CLAUDE.md;
+    # the hook owns the board, inbox, user model, ordering, and the total cap.
+    if inject:
+        return _wake_inject(scope, entries, dead, ids, pins,
+                            live_state, mile, haz, inv, n)
+
+    if pins:
+        print(pins)
+        print()
     print(f"[BRAIN WAKE scope={scope}] state — computed from the stream: "
           f"{len(live_state)} live rulings (of {n} entries), newest first "
           f"(long rulings clipped — `brain decisions` for full text):")
@@ -1647,10 +1670,6 @@ def cmd_wake(args) -> int:
         p = _parse(ln)
         if p:
             counts[p[1]] = counts.get(p[1], 0) + 1
-    haz = len([i for i, ln in enumerate(entries, start=1)
-               if _is_hazard(ln) and i not in dead])
-    inv = len([i for i, ln in enumerate(entries, start=1)
-               if (p := _parse(ln)) and p[1] == "invariant" and i not in dead])
     print("\n-- pull map (nothing below is pushed; retrieve on demand) --")
     if haz:
         print(f"   {haz} live hazards (gotcha/dead-end), indexed by subsystem, never summarized:")
@@ -1683,25 +1702,78 @@ def cmd_wake(args) -> int:
             for fn in docs:
                 print(f"     projects/{scope}/{fn}")
     if scope == "global":
-        others = [s for s in _scopes() if s != "global"]
-        if others:
-            # Only scopes with entries their summary hasn't absorbed yet are
-            # worth a line: a scope whose count equals its watermark has
-            # nothing a session could learn from being told about it, and 20
-            # such lines are the bulk of this block.
-            fresh, current = [], []
-            for s in others:
-                sn = len(_read_entries(s))
-                swm, _, _, _, _ = _root_meta(s)
-                (fresh if sn - swm > 0 else current).append((s, sn, sn - swm))
-            print("\n-- other scopes --")
+        # Only scopes with entries their summary hasn't absorbed yet are worth a
+        # line: a scope whose count equals its watermark carries nothing new, so
+        # the "up to date, nothing new" roll-call (20+ names, zero information)
+        # is gone entirely.
+        fresh = []
+        for s in _scopes():
+            if s == "global":
+                continue
+            sn = len(_read_entries(s))
+            swm, *_ = _root_meta(s)
+            if sn - swm > 0:
+                fresh.append((s, sn, sn - swm))
+        if fresh:
+            print("\n-- other scopes (unsummarized entries only) --")
             for s, sn, unsum in sorted(fresh, key=lambda r: -r[2]):
                 print(f"   {s}: {sn} entries, {unsum} not yet summarized")
-            if current:
-                print(f"   up to date, nothing new since their last summary: "
-                      f"{', '.join(s for s, _, _ in current)}")
             print("   any of them: brain wake --scope <slug>")
     _print_ticket_board(TICKETS_ROOT)
+    return 0
+
+
+def _wake_inject(scope, entries, dead, ids, pins, live_state, mile,
+                 haz, inv, n) -> int:
+    """`brain wake --inject`: sections 1 (header + pins) and 5 (computed STATE)
+    only. No pull map, no board, no transcript pointer, no "up to date" list.
+    The SessionStart hook owns the user model, board, inbox, ordering, and the
+    one hard total budget; every static sentence the old injection carried now
+    lives in ~/.claude/CLAUDE.md."""
+    # Section 1 — one header line, then pinned invariants verbatim. Never trimmed.
+    print(f"[BRAIN scope={scope}] {len(live_state)} live rulings · {haz} live hazards "
+          f"· {inv} live invariants · {n} entries total")
+    if pins:
+        print(pins)
+    # Section 5 — newest live rulings, clipped to 200 chars, 1500-char budget.
+    shown, used = [], 0
+    for i, p in reversed(live_state):
+        line = _fmt(i, entries[i - 1], dead, ids)
+        if len(line) > INJECT_CLIP:
+            line = line[:INJECT_CLIP - 3] + "..."
+        if used + len(line) > INJECT_STATE_CHARS:
+            break
+        shown.append(line)
+        used += len(line)
+    print()
+    print(f"[BRAIN STATE] {len(live_state)} live rulings, newest first "
+          f"(clipped — brain decisions --scope {scope} for full):")
+    for line in shown:
+        print(line)
+    older = len(live_state) - len(shown)
+    if older:
+        print(f"   (+{older} older: brain decisions --scope {scope})")
+    if mile:
+        recent = "; ".join(f"#{_did(ids, i)} {p[3][:70]}" for i, p in mile[-3:])
+        print(f"   recent milestones: {recent}")
+    deep_dir = os.path.join(KB_ROOT, "projects", scope)
+    if os.path.isdir(deep_dir):
+        docs = sorted(fn for fn in os.listdir(deep_dir) if fn.endswith(".md"))
+        if docs:
+            print("   deep docs: " + ", ".join(f"projects/{scope}/{fn}" for fn in docs))
+    if scope == "global":
+        fresh = []
+        for s in _scopes():
+            if s == "global":
+                continue
+            sn = len(_read_entries(s))
+            swm, *_ = _root_meta(s)
+            if sn - swm > 0:
+                fresh.append((s, sn, sn - swm))
+        if fresh:
+            print("   other scopes with unsummarized entries:")
+            for s, sn, unsum in sorted(fresh, key=lambda r: -r[2]):
+                print(f"     {s}: {sn} entries, {unsum} not yet summarized")
     return 0
 
 
@@ -3251,8 +3323,11 @@ def main() -> int:
                    help="scope slug to share (default: global)")
     p.set_defaults(fn=cmd_share)
 
-    p = sub.add_parser("wake", help="root + newest raw tail + pull map")
+    p = sub.add_parser("wake", help="pins + computed state + pull map + board")
     p.add_argument("--scope", help="scope slug (default: global)")
+    p.add_argument("--inject", action="store_true",
+                   help="SessionStart shape: header + pins + computed state only "
+                        "(no pull map, board, or cross-scope roll-call)")
     p.set_defaults(fn=cmd_wake)
 
     p = sub.add_parser("hazards", help="gotchas/dead-ends verbatim, grouped by subsystem")
