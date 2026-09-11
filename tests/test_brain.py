@@ -277,6 +277,63 @@ def test_wake_silent_when_no_board_root(root):
     assert "-- board:" not in r.stdout
 
 
+# --- wake --inject: the SessionStart shape (sections 1 + 5 only) ----------
+
+def test_wake_inject_is_header_and_state_only(root):
+    run(root, "note", "-p", "demo", "-t", "invariant", "--pin", "--subsystem",
+        "identity", "demo tracks accounts A and B", expect=0)
+    run(root, "note", "-p", "demo", "-t", "decision", "chose approach A", expect=0)
+    run(root, "note", "-p", "demo", "-t", "gotcha", "--subsystem", "net",
+        "connections leak on retry", expect=0)
+    init_board(root)
+    tickets_run(root, "open", "some due thing", "--due", "2020-01-01", expect=0)
+    r = run(root, "wake", "--inject", "--scope", "demo", expect=0)
+    out = r.stdout
+    # Section 1: a single header line, first, carrying the computed counts.
+    assert out.lstrip().startswith("[BRAIN scope=demo]")
+    first = out.strip().splitlines()[0]
+    assert "live rulings" in first and "live hazards" in first
+    assert "live invariants" in first and "entries total" in first
+    # Pins render verbatim under the header.
+    assert "demo tracks accounts A and B" in out
+    # Section 5 is present and computed.
+    assert "[BRAIN STATE]" in out
+    assert "chose approach A" in out
+    # Deleted from the injection: pull map, board footer, all instructional prose.
+    assert "-- pull map" not in out
+    assert "-- board:" not in out
+    assert "full board:" not in out
+    assert "Capture inline" not in out
+    assert "Route before you write" not in out
+
+
+def test_wake_inject_clips_rulings_to_200(root):
+    long_text = "z" * 500
+    run(root, "note", "-p", "demo", "-t", "decision", long_text, expect=0)
+    r = run(root, "wake", "--inject", "--scope", "demo", expect=0)
+    ruling = [ln for ln in r.stdout.splitlines() if ln.startswith("#")][0]
+    assert len(ruling) <= 200
+    assert ruling.endswith("...")
+
+
+def test_wake_inject_drops_up_to_date_rollcall(root):
+    # A scope whose summary is current must NOT be named anywhere in the output.
+    run(root, "note", "-p", "global", "-t", "decision", "global seed", expect=0)
+    run(root, "note", "-p", "quietscope", "-t", "decision", "other seed", expect=0)
+    run(root, "rebuild", "--scope", "quietscope", expect=0)  # watermark == count
+    r = run(root, "wake", "--inject", "--scope", "global", expect=0)
+    assert "up to date, nothing new" not in r.stdout
+    assert "quietscope" not in r.stdout
+
+
+def test_human_wake_also_drops_up_to_date_rollcall(root):
+    run(root, "note", "-p", "global", "-t", "decision", "global seed", expect=0)
+    run(root, "note", "-p", "quietscope", "-t", "decision", "other seed", expect=0)
+    run(root, "rebuild", "--scope", "quietscope", expect=0)
+    r = run(root, "wake", "--scope", "global", expect=0)
+    assert "up to date, nothing new" not in r.stdout
+
+
 # ------------------------------------------------ §5 existing commands unchanged
 
 def test_existing_commands_smoke(root):

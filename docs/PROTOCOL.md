@@ -101,7 +101,7 @@ There are three homes for a durable fact, and the class decides the home:
 
 ## Retrieval
 
-- `brain wake --scope <s>` — root state + newest raw tail + pull map (the session-start injection).
+- `brain wake --scope <s>` — pins + computed state + pull map + board (human / cross-scope pull); `--inject` prints only the header line + pins + computed state, the two sections the SessionStart hook composes into the injection.
 - `brain hazards --scope <s> [--grep RX]` — live hazard index; BEFORE touching a subsystem.
 - `brain design --scope <s> [--grep RX]` — live invariants; BEFORE redesigning one.
 - `brain lint [--scope <s>]` — deterministic integrity audit: provenance resolves live, supersession acyclic, label near-duplicates, view budgets.
@@ -136,8 +136,12 @@ enforcement layer. Every hook resolves the instance from `BRAIN_ROOT` / config /
 the default `brain/` folder — none hardcode a path. All injection hooks honor
 `BRAIN_NO_INJECT=1`. The Stop hook gates on session substance (below).
 
-- **SessionStart `kb_card_inject.py`** — injects the cwd scope's `[BRAIN WAKE]`
-  (root state + newest raw tail + pull map). Scope = first path component under
+- **SessionStart `kb_card_inject.py`** — injects only what is COMPUTED per
+  session, in a fixed order under ONE hard total budget (7000 chars): the cwd
+  scope's header + pins (`brain wake --inject` §1), `[BRAIN USER]`, `[BRAIN
+  BOARD]` (due tickets once + a summary line), `[BRAIN INBOX]`, then `[BRAIN
+  STATE]` (§5, trimmed first when over). No instructional prose — that lives in
+  the deployment's session rules. Scope = first path component under
   `BRAIN_PROJECTS_ROOT`, else the directory basename (`BRAIN_SCOPE_ALIASES`,
   `name=scope,...`, remaps names); nothing is injected for a stream-less scope.
 - **PostToolUse `kb_hazard_inject.py`** — on a project-code Write/Edit, injects
