@@ -1607,7 +1607,13 @@ def cmd_wake(args) -> int:
     entries = _read_entries(scope)
     n = len(entries)
     if not n:
-        print(f"[BRAIN WAKE scope={scope}] empty stream.")
+        if inject:
+            print(f"[BRAIN scope={scope}] 0 live rulings · 0 live hazards "
+                  f"· 0 live invariants · 0 entries total")
+            print()
+            print("[BRAIN STATE] empty stream.")
+        else:
+            print(f"[BRAIN WAKE scope={scope}] empty stream.")
         return 0
     ids = _ids_for(scope)
     dead = _superseded(entries, ids)

@@ -41,6 +41,7 @@ is silent until it has memory. Always exits 0.
 """
 import datetime
 import json
+import re
 import os
 import subprocess
 import sys
@@ -441,10 +442,11 @@ def _wake_inject(slug):
         out = ""
     if not out:
         return None, None
-    marker = "[BRAIN STATE]"
-    idx = out.find(marker)
-    if idx == -1:
+    # Line-anchored: a pin or ruling may legitimately quote the marker text.
+    m = re.search(r"^\[BRAIN STATE\]", out, flags=re.M)
+    if not m:
         return out, None
+    idx = m.start()
     return out[:idx].strip(), out[idx:].strip()
 
 
