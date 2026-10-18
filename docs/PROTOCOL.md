@@ -94,9 +94,13 @@ There are three homes for a durable fact, and the class decides the home:
    the same signal clustered; promote the recurring ones.
 4. **What *is*, never planned state** — except the ticket board (below). A
    `question` entry is the sanctioned way to record a genuine unknown.
-5. **New scope**: the first `brain note --project <slug>` creates the stream. Add
-   the scope's identity card (see *Scope cards & lifecycle*) so indexes and
-   cross-project routing see it.
+5. **New scope**: `brain new-project <slug> --dir PATH [--prefix PREFIX]` does the
+   whole stand-up in one idempotent call — `git init` + a first commit in PATH, the
+   founding stream milestone, the scope's identity card (see *Scope cards &
+   lifecycle*), and the ticket prefix (default = slug upper-cased) registered on the
+   board. Re-running reports what already exists and changes nothing, so it is also
+   the repair tool for a half-built scope. (A bare `brain note --project <slug>` still
+   creates a stream on its own, but leaves the card, repo, and prefix for you.)
 6. **No secrets, ever.** Env var names OK; values never.
 
 ## Retrieval
@@ -173,8 +177,9 @@ runner treats backslashes as escape sequences.
 Every scope keeps an identity card, `projects/<scope>.md`: full frontmatter (the
 bundle index generator reads it; `affects:` — the cross-project routing key — is
 grepped there) plus a body of pointers only: wake/hazards/capture commands,
-surviving deep docs, repo location — no state; the stream owns state. Copy an
-existing card when creating one. The lifecycle rides on the card's `status:`
+surviving deep docs, repo location — no state; the stream owns state. `brain
+new-project` writes the card from the engine's `templates/project-card.md`; fill in
+its `description`/`tags`/`affects` afterwards. The lifecycle rides on the card's `status:`
 (`active`, `partial`, `broken`, `parked`, `superseded`), recorded in the stream as
 a decision/milestone. Retiring a project moves its repo directory into the
 deployment's archive location — a plain move, never a rewrite; stream and card stay

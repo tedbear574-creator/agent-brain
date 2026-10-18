@@ -1376,3 +1376,84 @@ def test_grep_antihit_dedupes_when_head_matches(root):
         "retry budget capped at ten attempts per window", expect=0)
     out = run(root, "grep", "retry budget capped", "--scope", "demo", expect=0).stdout
     assert _antihit_lines(out) == [], out
+
+
+# --------------------------------------------------------------------------- #
+# new-project — one-call project scaffolding (AGENT-BRAIN-58)                  #
+# --------------------------------------------------------------------------- #
+
+
+def _git_commits(path):
+    r = subprocess.run(["git", "-C", path, "rev-list", "--count", "HEAD"],
+                       capture_output=True, text=True)
+    return int(r.stdout.strip()) if r.returncode == 0 else 0
+
+
+def test_new_project_fresh_run(root, tmp_path):
+    proj = tmp_path / "proj"
+    r = run(root, "new-project", "my-tool", "--dir", str(proj), expect=0)
+    out = r.stdout
+
+    # 1. repo: git-initialised with exactly one commit
+    assert (proj / ".git").is_dir(), out
+    assert _git_commits(str(proj)) == 1, out
+
+    # 2. first stream entry — a single founding milestone for the scope
+    stream = os.path.join(root["kb"], "stream", "my-tool.log")
+    assert os.path.isfile(stream), out
+    with open(stream, encoding="utf-8") as f:
+        lines = [ln for ln in f if ln.strip()]
+    assert len(lines) == 1, lines
+    assert "| milestone |" in lines[0] and str(proj) in lines[0], lines
+
+    # 3. scope card from the template, placeholders filled in
+    card = os.path.join(root["kb"], "projects", "my-tool.md")
+    assert os.path.isfile(card), out
+    body = open(card, encoding="utf-8").read()
+    assert 'title: "my-tool"' in body
+    assert "{{" not in body                       # every placeholder substituted
+    assert "brain wake --scope my-tool" in body
+
+    # 4. ticket prefix registered on the board (default = slug upper-cased)
+    cfg = json.load(open(os.path.join(root["kb"], "tickets", "config.json"),
+                         encoding="utf-8"))
+    assert cfg.get("prefixes", {}).get("MY-TOOL") == "my-tool", cfg
+
+
+def test_new_project_custom_prefix(root, tmp_path):
+    proj = tmp_path / "proj"
+    run(root, "new-project", "my-tool", "--dir", str(proj),
+        "--prefix", "mt", expect=0)
+    cfg = json.load(open(os.path.join(root["kb"], "tickets", "config.json"),
+                         encoding="utf-8"))
+    assert cfg.get("prefixes", {}).get("MT") == "my-tool", cfg
+
+
+def test_new_project_idempotent_rerun(root, tmp_path):
+    proj = tmp_path / "proj"
+    run(root, "new-project", "my-tool", "--dir", str(proj), expect=0)
+
+    card = os.path.join(root["kb"], "projects", "my-tool.md")
+    stream = os.path.join(root["kb"], "stream", "my-tool.log")
+    card_before = open(card, encoding="utf-8").read()
+    commits_before = _git_commits(str(proj))
+
+    r2 = run(root, "new-project", "my-tool", "--dir", str(proj), expect=0)
+    out = r2.stdout
+    assert "already" in out, out                  # reports what already exists
+
+    # nothing destroyed / duplicated on the re-run
+    assert open(card, encoding="utf-8").read() == card_before
+    assert _git_commits(str(proj)) == commits_before
+    with open(stream, encoding="utf-8") as f:
+        assert len([ln for ln in f if ln.strip()]) == 1   # still one milestone
+    cfg = json.load(open(os.path.join(root["kb"], "tickets", "config.json"),
+                         encoding="utf-8"))
+    assert list(cfg.get("prefixes", {})).count("MY-TOOL") == 1, cfg
+
+
+def test_new_project_rejects_bad_slug(root, tmp_path):
+    proj = tmp_path / "proj"
+    r = run(root, "new-project", "My_Tool", "--dir", str(proj))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "slug" in r.stderr.lower()
