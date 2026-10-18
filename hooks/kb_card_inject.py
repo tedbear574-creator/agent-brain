@@ -247,18 +247,12 @@ def _shrink_state(state: str, target: int) -> str:
 
     while len(build()) > target and rulings:
         rulings.pop()                       # oldest live ruling first
-    if len(build()) <= target:
-        return build()
-    for idx, ln in enumerate(rest):         # then the cross-scope roll-call
-        if ln.strip().startswith("other scopes with unsummarized entries"):
-            rest = rest[:idx]
-            break
     return build()
 
 
 def _assemble(header, user, board, inbox, state) -> str:
     """Join the sections in fixed order under ONE hard total budget. Trim order
-    when over: STATE rulings oldest-first, then STATE other-scopes lines, then
+    when over: STATE rulings oldest-first, then
     USER via _fair_trim. Header + pins, board, and inbox are never trimmed."""
     parts = [header, user, board, inbox, state]
     if len(_join(parts)) <= INJECT_MAX_CHARS:

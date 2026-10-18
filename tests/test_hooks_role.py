@@ -131,8 +131,7 @@ def test_assemble_trim_order_state_then_user():
     inbox = "[BRAIN INBOX]\n- item"
     user = "## U\n" + "\n".join(f"- user fact {i} " + "u" * 60 for i in range(40))
     state = ("[BRAIN STATE] rulings:\n"
-             + "\n".join(f"#{i} " + "s" * 180 for i in range(40))
-             + "\n   other scopes with unsummarized entries:\n     y: 2 entries, 2 not yet summarized")
+             + "\n".join(f"#{i} " + "s" * 180 for i in range(40)))
     out = mod._assemble(header, user, board, inbox, state)
     assert len(out) <= mod.INJECT_MAX_CHARS
     # Never-trimmed sections survive whole and the header stays first.

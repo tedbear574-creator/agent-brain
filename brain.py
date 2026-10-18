@@ -1530,19 +1530,6 @@ def _wake_inject(scope, entries, dead, pins, live_state, mile,
         docs = sorted(fn for fn in os.listdir(deep_dir) if fn.endswith(".md"))
         if docs:
             print("   deep docs: " + ", ".join(f"projects/{scope}/{fn}" for fn in docs))
-    if scope == "global":
-        fresh = []
-        for s in _scopes():
-            if s == "global":
-                continue
-            sn = len(_read_entries(s))
-            swm, *_ = _root_meta(s)
-            if sn - swm > 0:
-                fresh.append((s, sn, sn - swm))
-        if fresh:
-            print("   other scopes with unsummarized entries:")
-            for s, sn, unsum in sorted(fresh, key=lambda r: -r[2]):
-                print(f"     {s}: {sn} entries, {unsum} not yet summarized")
     return 0
 
 

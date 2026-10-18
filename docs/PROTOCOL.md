@@ -124,7 +124,7 @@ tell.
 The `hooks/` directory holds the Claude Code
 enforcement layer. Every hook resolves the instance from `BRAIN_ROOT` / config /
 the default `brain/` folder — none hardcode a path. All injection hooks honor
-`BRAIN_NO_INJECT=1`. The Stop hook gates on session substance (below).
+`BRAIN_NO_INJECT=1`. The Stop hook (below) ships with the engine; a deployment may leave it unwired.
 
 - **SessionStart `kb_card_inject.py`** — injects only what is COMPUTED per
   session, in a fixed order under ONE hard total budget (7000 chars): the cwd
