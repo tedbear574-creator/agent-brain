@@ -3267,6 +3267,165 @@ def cmd_doctor(_args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- new-project
+# Standing up a new project used to be a manual checklist (git init, the first
+# stream note, copy a card, register the prefix). Every step is mechanical and
+# forgetting one leaves a half-born scope (a stream with no card, a card with no
+# board prefix). `brain new-project` does the whole checklist in one call and is
+# idempotent — re-running on an existing project reports what is already there
+# and changes nothing — so it is also the repair tool for a project set up by
+# hand before this command existed.
+
+SLUG_RX = re.compile(r"[a-z0-9][a-z0-9-]*")
+HUB_BOARD_PREFIX = "HUB"
+HUB_BOARD_NAME = "Assistant hub board"
+
+
+def _projects_dir() -> str:
+    return os.path.join(KB_ROOT, "projects")
+
+
+def _card_template() -> str:
+    return os.path.join(_package_dir(), "templates", "project-card.md")
+
+
+def _run_git(path: str, *args: str):
+    """Run one git command in `path`; return the CompletedProcess (or None if
+    git is not installed). An initial-commit helper for a BRAND-NEW repo that may
+    have no user identity configured, so a throwaway identity is passed inline —
+    it never overrides a configured one for later commits."""
+    git = shutil.which("git")
+    if not git:
+        return None
+    cmd = [git, "-C", path,
+           "-c", "user.name=agent-brain", "-c", "user.email=agent-brain@local",
+           *args]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+
+def _git_has_commit(path: str) -> bool:
+    r = _run_git(path, "rev-parse", "--verify", "-q", "HEAD")
+    return bool(r) and r.returncode == 0
+
+
+def _init_repo(path: str) -> str:
+    """git init (if needed) + a first commit (if the repo has none). Returns a
+    one-line human report of what it did. Idempotent: an existing repo that
+    already has a commit is left untouched."""
+    if not shutil.which("git"):
+        return "git not installed — skipped repo init (set it up manually)"
+    os.makedirs(path, exist_ok=True)
+    is_repo = os.path.isdir(os.path.join(path, ".git"))
+    did = []
+    if not is_repo:
+        r = _run_git(path, "init", "-q")
+        if not r or r.returncode != 0:
+            return f"git init failed: {(r.stderr if r else '').strip() or 'unknown'}"
+        did.append("git init")
+    if _git_has_commit(path):
+        return ("repo already initialised (has commits)" if is_repo
+                else did[0] + "; repo already had commits")
+    # No commit yet: stage whatever is there; if there's nothing to commit, drop
+    # a starter README so the first commit is never empty.
+    _run_git(path, "add", "-A")
+    st = _run_git(path, "status", "--porcelain")
+    if not st or not st.stdout.strip():
+        readme = os.path.join(path, "README.md")
+        if not os.path.exists(readme):
+            with open(readme, "w", encoding="utf-8") as f:
+                f.write(f"# {os.path.basename(os.path.abspath(path))}\n")
+        _run_git(path, "add", "-A")
+    c = _run_git(path, "commit", "-q", "-m", "Initial commit")
+    if not c or c.returncode != 0:
+        return f"git init done; first commit failed: {(c.stderr if c else '').strip()}"
+    did.append("first commit")
+    return " + ".join(did) if did else "first commit"
+
+
+def _write_card(slug: str, path: str) -> str:
+    """Create projects/<slug>.md from the engine's card template. Idempotent:
+    leaves an existing card untouched. Returns a one-line report."""
+    dest = os.path.join(_projects_dir(), f"{slug}.md")
+    if os.path.exists(dest):
+        return f"card already exists ({dest})"
+    tpl = _card_template()
+    if not os.path.isfile(tpl):
+        return f"card template missing ({tpl}) — card NOT created"
+    with open(tpl, "r", encoding="utf-8") as f:
+        body = f.read()
+    now = datetime.now()
+    body = (body.replace("{{SLUG}}", slug)
+                .replace("{{DIR}}", os.path.abspath(path))
+                .replace("{{DATE}}", now.strftime("%Y-%m-%d"))
+                .replace("{{TIMESTAMP}}", now.strftime("%Y-%m-%dT%H:%M:%SZ")))
+    os.makedirs(_projects_dir(), exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(body)
+    return f"created card {dest}"
+
+
+def _register_prefix(slug: str, prefix: str) -> str:
+    """Ensure the board exists and the project's prefix is registered on it.
+    Idempotent. Returns a one-line report."""
+    try:
+        import tickets
+    except Exception as e:
+        return f"could not load the ticket tool ({e}) — prefix NOT registered"
+    try:
+        created = tickets.ensure_board(TICKETS_ROOT, prefix=HUB_BOARD_PREFIX,
+                                       name=HUB_BOARD_NAME)
+        added = tickets.register_prefix(TICKETS_ROOT, prefix, project=slug)
+    except Exception as e:
+        return f"prefix registration failed: {e}"
+    board = "created the board; " if created else ""
+    return (f"{board}registered prefix {prefix}" if added
+            else f"{board}prefix {prefix} already registered")
+
+
+def cmd_new_project(args) -> int:
+    """Stand up a new project in one call: git-init its repo, write its first
+    stream entry, create its scope card, and register its ticket prefix. Every
+    step is idempotent, so re-running reports what already exists and does
+    nothing destructive. Honours BRAIN_ROOT, so the whole thing lands in a test
+    root, never the real store."""
+    slug = (args.slug or "").strip().lower()
+    if not SLUG_RX.fullmatch(slug):
+        print("error: slug must be lowercase letters/digits/hyphens and start "
+              "with a letter or digit (e.g. my-new-tool)", file=sys.stderr)
+        return 1
+    path = os.path.abspath(os.path.expanduser(args.dir))
+    prefix = (args.prefix or slug).strip().upper()
+
+    print(f"new-project {slug}  (dir {path}, prefix {prefix})")
+
+    # 1. repo
+    print(f"  repo:   {_init_repo(path)}")
+
+    # 2. first stream entry — only when the scope has no stream yet, so a re-run
+    #    never appends a second founding milestone.
+    if _read_entries(slug):
+        print(f"  stream: scope {slug} already has entries — left as is")
+    else:
+        note_args = argparse.Namespace(
+            project=slug, type="milestone",
+            text=[f"project started at {path}"],
+            supersedes=None, asof=None, source=None, subsystem=None,
+            force_type=False, distinct=False, pin=False)
+        if cmd_note(note_args) != 0:
+            print("  stream: first entry FAILED", file=sys.stderr)
+            return 1
+        print(f"  stream: wrote founding milestone for scope {slug}")
+
+    # 3. scope card
+    print(f"  card:   {_write_card(slug, path)}")
+
+    # 4. ticket prefix
+    print(f"  board:  {_register_prefix(slug, prefix)}")
+
+    print(f"done. capture with: brain note --project {slug} --type T \"...\"")
+    return 0
+
+
 # ---------------------------------------------------------------- main
 
 def main() -> int:
@@ -3423,6 +3582,13 @@ def main() -> int:
 
     p = sub.add_parser("doctor", help="report the instance's data root and git safety-net status")
     p.set_defaults(fn=cmd_doctor)
+
+    p = sub.add_parser("new-project", help="stand up a new project: git init + "
+                       "first stream entry + scope card + ticket prefix (idempotent)")
+    p.add_argument("slug", help="scope slug (lowercase letters/digits/hyphens)")
+    p.add_argument("--dir", required=True, help="the project's repo directory")
+    p.add_argument("--prefix", help="ticket prefix (default: slug upper-cased)")
+    p.set_defaults(fn=cmd_new_project)
 
     args = ap.parse_args()
     return args.fn(args)

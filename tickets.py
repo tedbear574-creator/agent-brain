@@ -464,6 +464,50 @@ def _is_overdue(due: str, status: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def ensure_board(root: str, *, prefix: str, name: str) -> bool:
+    """Create the board folder + config.json if it does not exist yet, so a
+    caller can register a project against a board that may not be set up on this
+    machine. Idempotent: returns True when it created the board, False when one
+    was already there (and leaves the existing config untouched)."""
+    root = os.path.abspath(os.path.expanduser(root))
+    if os.path.exists(_config_path(root)):
+        return False
+    prefix = _norm_prefix(prefix)
+    name = (name or "").strip()
+    if not prefix or not name:
+        raise TicketError("A new board needs both a short code and a full name.")
+    os.makedirs(_events_dir(root), exist_ok=True)
+    with open(_config_path(root), "w", encoding="utf-8") as f:
+        json.dump({"prefix": prefix, "name": name}, f, indent=2)
+        f.write("\n")
+    _write_launcher(root)
+    return True
+
+
+def register_prefix(root: str, prefix: str, project: str = "") -> bool:
+    """Record a project's ticket prefix on the board so the board knows the code
+    belongs to a project (the first ticket under it no longer has to invent it).
+    Stored in config.json under `prefixes` ({CODE: slug}); additive, so an older
+    board without the key reads fine. Idempotent: returns True when it added the
+    prefix, False when it was already registered. Requires an existing board."""
+    root = os.path.abspath(os.path.expanduser(root))
+    prefix = _norm_prefix(prefix)
+    if not prefix:
+        raise TicketError("A prefix is required to register it on the board.")
+    cfg = load_config(root)
+    prefixes = cfg.get("prefixes")
+    if not isinstance(prefixes, dict):
+        prefixes = {}
+    if prefix in prefixes:
+        return False
+    prefixes[prefix] = (project or "").strip()
+    cfg["prefixes"] = prefixes
+    with open(_config_path(root), "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    return True
+
+
 def cmd_init(args) -> int:
     """Create a new board folder."""
     root = os.path.abspath(os.path.expanduser(args.root))
