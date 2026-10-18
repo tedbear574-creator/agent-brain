@@ -3,7 +3,7 @@
 Durable, greppable memory for agent-driven work — plain text, stdlib-only, and
 portable enough to run from a folder copy on a locked-down laptop.
 
-Agent Brain is three small command-line tools over an append-only, plain-text
+Agent Brain is two small command-line tools over an append-only, plain-text
 store:
 
 - **`brain`** — the memory engine: an append-only typed **stream** per scope, a
@@ -13,14 +13,10 @@ store:
 - **`tickets`** — a multi-writer **ticket board**: the one place a fixable defect
   or tracked commitment lives. Per-writer append-only event logs folded into a
   computed board, so it is conflict-free under folder sync.
-- **`registers`** — multi-writer **registers**: repeated records of one schema
-  (entities, documents, interviews, expenses…), each a folder with its own
-  config and CSV/board faces.
 
 The distinction that makes it work: **a defect you would fix is a ticket, not a
-note; a fact the next session must know is a note; a repeated structured record
-is a register.** (`docs/PROTOCOL.md` is the canonical protocol — routing rules,
-write rules, retrieval, enforcement.)
+note; a fact the next session must know is a note.** (`docs/PROTOCOL.md` is the
+canonical protocol — routing rules, write rules, retrieval, enforcement.)
 
 ## Why it's different
 
@@ -36,14 +32,12 @@ CLIs.
 - **Dev machine (git available)** — every `brain` write commits; git is the
   stream's safety net (the stream is the only non-regenerable artifact).
 - **Locked-down / OneDrive machine (no git)** — the engine detects no git and
-  degrades explicitly: the append-only spool files plus your folder-sync version
-  history are the record, and `brain doctor` says so out loud. Tickets and
-  registers are conflict-free under sync by design (per-writer files).
+  degrades explicitly: the append-only stream files plus your folder-sync version
+  history are the record, and `brain doctor` says so out loud. Tickets are
+  conflict-free under sync by design (per-writer files).
 
-Multi-writer honesty: **tickets and registers are multi-writer**; the **stream
-is single-writer per instance by default**, with an opt-in shared-scope layout
-(`brain share`) when one scope must take appends from several machines on a sync
-folder (`docs/PROTOCOL.md` → *Shared scopes*).
+Multi-writer honesty: **tickets are multi-writer**; the **stream is
+single-writer per instance** (one machine appends to each scope's stream log).
 
 ## Quickstart
 
@@ -59,7 +53,7 @@ python tickets.py open "fix the flaky test" --root ./boards/work
 ```
 
 Point any tool at a different instance with `BRAIN_ROOT` (for `brain`) or
-`--root` (for `tickets`/`registers`). No pip installs, no compiled dependencies —
+`--root` (for `tickets`). No pip installs, no compiled dependencies —
 Python 3.10+ standard library only.
 
 ### Full install (data root + Claude Code hooks)
@@ -73,53 +67,6 @@ The installer creates the instance, writes `brain.config.json` naming its data
 root, and merges the six hooks into your Claude Code `settings.json` (with a
 timestamped backup). Use `--print-only` to get the snippet to paste yourself, or
 `--no-git` for the folder-sync profile.
-
-## MCP server
-
-`brain_mcp.py` exposes all three engine CLIs as tools to any Model Context Protocol client
-(a desktop chat app, an editor, another agent) — so a surface with no Claude Code
-hook layer still gets the engine's discipline. Every tool call shells out to the
-real CLI, so each caps check, duplicate rejection, routing test, and subsystem
-requirement is enforced by the engine and its teaching error comes straight back
-in the tool result. It speaks JSON-RPC 2.0 over stdio and is stdlib-only, like
-everything else here.
-
-Tools exposed: `brain_note`, `brain_attest`, `brain_wake`, `brain_hazards`,
-`brain_design`, `brain_recall`, `brain_decisions`, `brain_grep`,
-`brain_resolve`, `brain_papercuts`; `tickets_board`, `tickets_open`,
-`tickets_update`, `tickets_close`; `registers_board`, `registers_show`,
-`registers_post`, `registers_add`. The `brain_*` tools act on the instance root
-(`--root` flag or `BRAIN_ROOT`); the board tools take a `root` argument per
-call — the folder is the deployment. Because the server is a per-session
-process it also carries the engine-side capture duty: each mutating board or
-register call accrues capture debt, and once it reaches two, every later tool
-result carries one advisory line to `brain_note` (or `brain_attest` if there is
-genuinely nothing to capture). It is a notice, never a block.
-
-Print the config with your real resolved paths:
-
-```sh
-python install/install.py --print-mcp --root ./brain
-```
-
-**Claude Desktop** — add to `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "agent-brain": {
-      "command": "python",
-      "args": ["/path/to/agent-brain/brain_mcp.py", "--root", "/path/to/brain"]
-    }
-  }
-}
-```
-
-**Claude Code** — one command:
-
-```sh
-claude mcp add agent-brain -- python /path/to/agent-brain/brain_mcp.py --root /path/to/brain
-```
 
 ## Instance model
 
@@ -155,13 +102,11 @@ stream — is never rewritten.
 
 ```
 brain.py            the memory engine CLI
-brain_mcp.py        the MCP server (same tools over JSON-RPC stdio)
 tickets.py          the ticket board CLI
-registers.py        the register CLI
 hooks/              Claude Code enforcement layer (instance-relative)
 install/install.py  create an instance + wire hooks (stdlib only)
 docs/PROTOCOL.md    conventions & write protocol (read this)
-docs/TICKETS-SPEC.md, docs/REGISTERS-SPEC.md
+docs/TICKETS-SPEC.md
 tests/              pytest suites (stdlib + pytest)
 ```
 

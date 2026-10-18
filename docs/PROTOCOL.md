@@ -36,9 +36,9 @@ cross-project scope is `global`):
   `--supersedes`. Pull `brain hazards` before touching a subsystem, `brain
   design` before redesigning one; the injected state carries neither.
 
-## Three-class routing — pin / stream / register
+## Two-class routing — pin / stream
 
-There are three homes for a durable fact, and the class decides the home:
+There are two homes for a durable fact, and the class decides the home:
 
 - **Pin** — an always-loaded identity fact. A pin is an `invariant` marked
   `--pin`; it renders verbatim at the top of every wake, so a scope's pins share
@@ -47,9 +47,6 @@ There are three homes for a durable fact, and the class decides the home:
 - **Stream** — everything else that is memory: a decision and its why, a gotcha,
   an abandoned approach, an open question. Retrieved on demand (`wake`,
   `hazards`, `design`, `recall`, `grep`), not pushed whole.
-- **Register** — repeated records of ONE schema (entities, documents,
-  interviews, expenses…). Not memory: a structured multi-writer table with its
-  own folder, config, and CSV/board faces (`registers.py --root <dir>`).
 
 ## Write rules
 
@@ -118,24 +115,13 @@ There are three homes for a durable fact, and the class decides the home:
 - `brain history "<query>"` — the un-curated transcript archive (pull-only).
 - Cross-scope coupling: a scope card's `affects:` key names coupled scopes — grep card frontmatter.
 
-## Enforcement (two layers)
+## Enforcement (Claude Code hooks)
 
-Enforcement lives in the ENGINE so every surface gets the discipline; the hooks
-are accelerators for one surface, not the mechanism. It is NEVER a wall: no write
-is blocked, no session refused service — enforcement is notices and obligations.
-Both layers run the SAME capture-or-attest contract: capture what the diff can't
-tell, or attest that there is genuinely nothing.
+Enforcement is NEVER a wall: no write is blocked, no session refused service — it
+is notices and obligations. The contract is simple: capture what the diff can't
+tell.
 
-**Engine-side (every MCP surface).** The MCP server (`brain_mcp.py`) is a
-per-session process, so it carries session state: each mutating board/register
-call (`tickets_open` / `tickets_update` / `tickets_close`, `registers_add` /
-`registers_post`) accrues one unit of *capture debt*; a `brain_note`/
-`brain_resolve` clears it, and `brain_attest` — the sanctioned "nothing to
-capture" exit — clears it and records a one-line reason to
-`<root>/_state/attest.log`. From two units of debt on, every tool result carries
-an advisory line to capture or attest — never blocking.
-
-**Hook-side (Claude Code).** The `hooks/` directory holds the Claude Code
+The `hooks/` directory holds the Claude Code
 enforcement layer. Every hook resolves the instance from `BRAIN_ROOT` / config /
 the default `brain/` folder — none hardcode a path. All injection hooks honor
 `BRAIN_NO_INJECT=1`. The Stop hook gates on session substance (below).
@@ -159,9 +145,9 @@ the default `brain/` folder — none hardcode a path. All injection hooks honor
   verbatim, once per entry per session, silent unless the lexical match is strong
   (it fires on every prompt — precision beats recall).
 - **Stop `kb_stop_guard.py`** — on sessions with substance — a write to any project
-  file outside the data root and the config dir, OR a mutating tickets/registers
+  file outside the data root and the config dir, OR a mutating tickets
   command — blocks the first stop until the session ran `brain note`/`brain
-  resolve`/`brain attest` or wrote inside the data root; even a trivial change is
+  resolve` or wrote inside the data root; even a trivial change is
   one line. Files created via shell heredocs are a known blind spot: substance is
   read from Write/Edit tool calls. `BRAIN_NO_STOP_GUARD=1` exempts a delegated worker.
 - **PreToolUse `kb_write_authority.py`** — denies data-root writes by a delegated
@@ -225,44 +211,12 @@ Agent-curated; how it is injected is deployment wiring.
 ## Portability invariant
 
 Knowledge in plain text (streams + markdown); intelligence in the harness; glue
-thin and enumerable (six hooks + three CLIs + a few env markers). Zero LLM
+thin and enumerable (six hooks + two CLIs + a few env markers). Zero LLM
 dependency, zero OS-scheduler dependency: the tree rebuilds mechanically on
 write. On a git-backed machine every write commits; on a no-git folder-sync
-machine the append-only spool files plus the sync's version history are the
+machine the append-only stream files plus the sync's version history are the
 record, and `brain doctor` says which profile is active.
 
-## Shared scopes — one scope, many machines
-
-A solo scope is a single append-only file written by one machine; it corrupts if two
-machines on a sync folder (OneDrive, Dropbox) append at once. A **shared scope**
-removes that hazard the way the ticket board does: one spool per writer plus a
-deterministic read-side fold.
-
-**Layout.** A scope is shared iff `stream/<scope>/` exists (a directory):
-`stream/<scope>.log` is the FROZEN legacy history — read forever, appended never —
-and `stream/<scope>/<writer>.log` is one append-only spool per writer. A machine
-writes ONLY its own spool, so no two machines ever touch the same file and nothing
-conflicts on a sync folder. The writer id comes from the `writer` key in
-`brain.config.json`, defaulting to the derivation `tickets.py` uses (last segment
-of the home path); `BRAIN_WRITER` overrides it.
-
-**Opt-in, one-way.** `brain share --scope X` freezes `X.log` and creates
-`stream/X/`. Everything else works unchanged — numbering, supersede refs, and every
-read/write path. Sharing cannot be undone: the frozen log guarantees legacy id stability.
-
-**Ids never move.** A legacy entry keeps its numeric id (`7`) — the frozen file makes
-it permanent; a spool entry's id is `<writer>:<seq>`, its 1-based line number in that
-writer's own spool — append-only, so stable forever. Display order is the fold: entries
-sorted by `(write-ts, writer, seq)`, legacy first on a tie. A late-arriving synced spool
-may interleave a row earlier or later, but no id ever changes — order is display, id is
-identity. Everything referencing an entry (`--supersedes`, `resolve`, pins, the hazard
-index) accepts both id forms; cross-writer refs are stored verbatim (`sup=alice:3,7`).
-
-**Fold is deterministic and read-side.** The same set of files produces the same
-fold on every machine with no coordination. All read paths (wake, hazards, design,
-recall, grep, zoom, decisions/…, rebuild, lint, status) consume the fold; all
-write paths append to the current writer's spool only. Caps, the duplicate gate,
-and supersede semantics are unchanged — the dup gate compares against the folded
-live view; cross-writer supersession is allowed mechanically. `lint` reports a
-supersede ref pointing at an id not present yet (a spool not synced) as a WARNING:
-sync lag is normal. `brain doctor` names each shared scope's writer set.
+The stream is single-writer per scope: each scope's `stream/<scope>.log` is one
+append-only file written by one machine. Entry ids are the 1-based line numbers,
+stable forever (the stream is never rewritten).

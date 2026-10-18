@@ -1457,3 +1457,22 @@ def test_new_project_rejects_bad_slug(root, tmp_path):
     r = run(root, "new-project", "My_Tool", "--dir", str(proj))
     assert r.returncode == 1, r.stdout + r.stderr
     assert "slug" in r.stderr.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Solo scope: the write path lands in a single stream/<scope>.log with plain   #
+# positional ids (moved from the retired multi-writer suite).                  #
+# --------------------------------------------------------------------------- #
+def test_solo_scope_writes_single_file_positional_ids(root):
+    import re as _re
+    run(root, "note", "-p", "solo", "-t", "decision", "one", expect=0)
+    run(root, "note", "-p", "solo", "-t", "decision", "two", expect=0)
+    stream = os.path.join(root["kb"], "stream", "solo.log")
+    with open(stream, encoding="utf-8") as f:
+        assert len([ln for ln in f if ln.strip()]) == 2
+    # No per-writer spool directory is ever minted.
+    assert not os.path.isdir(os.path.join(root["kb"], "stream", "solo"))
+    # Ids are the classic positional numbers — no <writer>:<seq> form anywhere.
+    r = run(root, "zoom", "solo", "1-9", expect=0)
+    assert "#1 " in r.stdout and "#2 " in r.stdout
+    assert not _re.search(r"#\w+:\d", r.stdout)

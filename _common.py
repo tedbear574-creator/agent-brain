@@ -1,7 +1,6 @@
-"""Small helpers shared by the three multi-writer CLIs (brain.py, tickets.py,
-registers.py).
+"""Small helpers shared by the CLIs (brain.py, tickets.py).
 
-Each of these was copied into all three files; a copy that drifts is a bug
+Each of these was copied into both files; a copy that drifts is a bug
 waiting to happen (two spool files that should never collide, a retry that
 rides out contention in one tool but not another). One home, imported everywhere.
 """

@@ -6,13 +6,6 @@ All paths below are relative to that root (plain text, git-backed, greppable):
   stream/<scope>.log         one entry per line:
                                          "ISO_TS | type | text"          or
                                          "ISO_TS | type | meta | text"   (meta: sup=7,9)
-  stream/<scope>/<writer>.log  a SHARED scope's per-writer spool (opt-in via
-                             `brain share`): the sibling <scope>.log is frozen
-                             legacy history, each writer appends only its own
-                             spool, and reads fold all of them deterministically
-                             by (ts, writer, seq). Spool ids are <writer>:<seq>;
-                             legacy ids stay numeric. Sync-folder safe. See
-                             docs/PROTOCOL.md "Shared scopes".
   tree/<scope>/root.md       topical "what is true now" state (generated)
   tree/<scope>/b<lo>-<hi>.md chrono branch summaries (generated)
   tree/<scope>/hazards.md    gotchas + dead ends, VERBATIM, grouped (generated)
@@ -48,9 +41,6 @@ Commands:
                                      never block, they COUNT, and recurrence prompts
                                      you to promote it to the board
   resolve --project X N "text"       retire hazard/papercut #N (milestone + sup=N)
-  share [--scope X]                  convert a scope to the multi-writer
-                                     (sync-folder) layout: freeze its log, route
-                                     new notes to a per-writer spool. One-way.
   papercuts [--scope X]              open papercuts clustered by recurrence
   dispatch ...                       RETIRED -> tracked work lives on the ticket
                                      board (tickets.py); the stub names the
@@ -66,15 +56,13 @@ Commands:
   rebuild [--scope X | --all] [--force] [--alert]   regenerate branches + indexes + root
   status                             per-scope counts, watermarks, injected footprint
   lint [--scope X]                   deterministic integrity audit (no LLM)
-  sessions [--scope X]               entries grouped by capture session (sid)
   history ingest|summarize|show <id>|"query"
                                      durable transcript archive (SQLite FTS5,
                                      outlives the ~30-day reaper); pull-only search
 
 Durability: every note/resolve auto-commits its stream file to the KB git repo
 (the stream is the only non-regenerable artifact); rebuild commits stream+tree.
-Entries are stamped with sid=<8 hex> from CLAUDE_CODE_SESSION_ID when present,
-giving per-session capture counts (`brain sessions`) a real denominator.
+Entries are stamped with sid=<8 hex> from CLAUDE_CODE_SESSION_ID when present.
 """
 from __future__ import annotations
 
@@ -91,7 +79,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from _common import append_with_retry, home_writer_name, safe_name
+from _common import append_with_retry
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -99,7 +87,7 @@ except Exception:
     pass
 
 # Instance root resolution (SPEC § Instance model). One machine has one brain
-# but many boards/registers, so the engine has a single data root, resolved in
+# but many boards, so the engine has a single data root, resolved in
 # priority order:
 #   1. BRAIN_ROOT env var — wins always (tests and evals isolate the store here).
 #   2. `root` key in a config file beside this script (brain.config.json), which
@@ -214,22 +202,17 @@ VIEW_DEFAULT_RECENT = 20  # un-narrowed type views cap out; say what was withhel
 # meta value (sup=, sid=) stays within [0-9a-f,#], so old lines are unaffected.
 # src= is the citation field (sha / path / doc / url): any run of non-space,
 # non-pipe chars — space is the meta separator, " | " the field separator.
-# The dedicated `sup=` alternative accepts BOTH id forms: legacy/solo numeric
-# refs (sup=7,9) and shared cross-writer refs (sup=alice:3,7) whose ids carry a
-# writer prefix and a colon. The generic [a-z]{2,8}=[0-9a-f,#]+ class could never
-# hold a writer:seq ref, so sup gets its own token that permits [A-Za-z._:-].
-_SUP_TOKEN = r"sup=[A-Za-z0-9._:,#-]+"
+# sup= holds the entry number(s) this entry replaces (sup=7,9).
 _META_TOKEN = (
-    rf"(?:{_SUP_TOKEN}|asof=\d{{4}}-\d{{2}}-\d{{2}}|src=[^\s|]+|[a-z]{{2,8}}=[0-9a-f,#]+)"
+    r"(?:asof=\d{4}-\d{2}-\d{2}|src=[^\s|]+|[a-z]{2,8}=[0-9a-f,#]+)"
 )
 META_RX = re.compile(rf"^{_META_TOKEN}( {_META_TOKEN})*$")
 
 
 def _sup_refs(meta: str) -> list[str]:
-    """Supersede reference ids stored in `meta`, as strings — each is either a
-    numeric legacy/solo id ('7') or a cross-writer id ('alice:3'). '#' prefixes
+    """Supersede reference ids stored in `meta`, as strings. '#' prefixes
     (if any) are stripped so a ref reads the same as the id it points at."""
-    m = re.search(r"\bsup=([A-Za-z0-9._:,#-]+)", meta or "")
+    m = re.search(r"\bsup=([0-9,#]+)", meta or "")
     if not m:
         return []
     return [r.lstrip("#") for r in m.group(1).split(",") if r.strip()]
@@ -322,104 +305,7 @@ def _scope_path(scope: str) -> str:
     return os.path.join(STREAM_DIR, f"{scope}.log")
 
 
-# --------------------------------------------------------------------------- #
-# Multi-writer (shared) scopes — SPEC "Shared scopes"                          #
-# --------------------------------------------------------------------------- #
-# A sync folder (OneDrive, Dropbox) corrupts a single file two machines append
-# to at once. The proven answer, copied from tickets.py/registers.py: one spool
-# file PER WRITER (stream/<scope>/<writer>.log) plus a deterministic read-side
-# fold. No two machines ever write the same file, so nothing conflicts.
-#
-# A scope is SHARED iff stream/<scope>/ exists (a directory). Sharing is opt-in
-# (`brain share`): it freezes the existing stream/<scope>.log as read-only
-# legacy history and routes every later note to the writing machine's own spool.
-# Solo scopes (a lone stream/<scope>.log, no dir) are untouched by any of this.
-
-
-def _spool_dir(scope: str) -> str:
-    return os.path.join(STREAM_DIR, scope)
-
-
-def _spool_path(scope: str, writer: str) -> str:
-    return os.path.join(_spool_dir(scope), f"{writer}.log")
-
-
-def _is_shared(scope: str) -> bool:
-    return os.path.isdir(_spool_dir(scope))
-
-
-def _safe_writer(name: str) -> str:
-    """Keep a writer id usable as a filename. Lowercased (so an id reads
-    identically everywhere ids are compared after lowercasing — recall
-    --exclude, the injection hooks) and hashed on change (two distinct raw names
-    'a/b' and 'a b' must never silently share one spool file)."""
-    return safe_name(name, lower=True, hash_on_change=True)
-
-
-def _writer_id() -> str:
-    """The id of the machine/person appending to a shared scope. One spool file
-    per writer, forever. Resolution order: BRAIN_WRITER env (test/CI isolation),
-    then the `writer` key in brain.config.json, then the same derivation
-    tickets.py uses (the last segment of the home path)."""
-    override = os.environ.get("BRAIN_WRITER")
-    if override and override.strip():
-        return _safe_writer(override.strip())
-    cfg = _load_config().get("writer")
-    if cfg and str(cfg).strip():
-        return _safe_writer(str(cfg).strip())
-    return _safe_writer(home_writer_name()) or "unknown"
-
-
-def _read_file_lines(path: str) -> list[str]:
-    if not os.path.isfile(path):
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        return [ln.rstrip("\n") for ln in f if ln.strip()]
-
-
-def _spool_writers(scope: str) -> list[str]:
-    """Writer ids with a spool in this shared scope, deterministically ordered."""
-    sdir = _spool_dir(scope)
-    if not os.path.isdir(sdir):
-        return []
-    return sorted(fn[:-4] for fn in os.listdir(sdir) if fn.endswith(".log"))
-
-
-def _fold(scope: str) -> tuple[list[str], list[str]]:
-    """Deterministic read-side merge of a shared scope -> (lines, ids), parallel.
-
-    Display order sorts by (write-ts, writer, seq); legacy frozen entries carry
-    writer='' so they sort first on ties, preserving their original file order.
-    A late-arriving synced spool may interleave differently, but every entry's
-    STABLE id never moves: legacy line N -> "N", spool line S of writer W ->
-    "W:S". Same set of files -> identical fold on every machine, no coordination.
-    """
-    rows: list[tuple[str, str, int, str, str]] = []
-    for seq, ln in enumerate(_read_file_lines(_scope_path(scope)), start=1):
-        p = _parse(ln)
-        rows.append((p[0] if p else "", "", seq, ln, str(seq)))
-    for w in _spool_writers(scope):
-        for seq, ln in enumerate(_read_file_lines(_spool_path(scope, w)), start=1):
-            p = _parse(ln)
-            rows.append((p[0] if p else "", w, seq, ln, f"{w}:{seq}"))
-    rows.sort(key=lambda r: (r[0], r[1], r[2]))
-    return [r[3] for r in rows], [r[4] for r in rows]
-
-
-def _ids_for(scope: str) -> list[str] | None:
-    """Stable-id list parallel to _read_entries, or None for a solo scope (where
-    the 1-based position IS the stable id and no translation is needed)."""
-    return _fold(scope)[1] if _is_shared(scope) else None
-
-
-def _did(ids: list[str] | None, pos: int) -> str:
-    """Display/reference id for a 1-based folded position."""
-    return ids[pos - 1] if ids else str(pos)
-
-
 def _read_entries(scope: str) -> list[str]:
-    if _is_shared(scope):
-        return _fold(scope)[0]
     path = _scope_path(scope)
     if not os.path.isfile(path):
         return []
@@ -434,9 +320,7 @@ def _scopes() -> list[str]:
     for fn in os.listdir(STREAM_DIR):
         path = os.path.join(STREAM_DIR, fn)
         if fn.endswith(".log") and os.path.isfile(path):
-            names.add(fn[:-4])           # solo scope, or a shared scope's frozen log
-        elif os.path.isdir(path):
-            names.add(fn)                # a shared scope's spool directory
+            names.add(fn[:-4])
     return sorted(names)
 
 
@@ -519,17 +403,11 @@ def _order_by_date(indices, entries):
     return sorted(indices, key=lambda i: _effective_date(entries[i - 1]))
 
 
-def _superseded(entries: list[str], ids: list[str] | None = None,
-                dangling: list[tuple[int, str]] | None = None) -> dict[int, int]:
+def _superseded(entries: list[str]) -> dict[int, int]:
     """superseded position -> position of the LIVE head of its supersession chain.
 
-    Keyed by 1-based POSITION in the folded list (so `idx in dead` works for all
-    the positional read code), even though supersede refs are STORED as stable
-    ids. For a solo scope `ids is None` and refs are numeric == position — the
-    original behaviour, unchanged. For a shared scope `ids` maps stable id ->
-    position; a ref whose target isn't present yet (a spool not synced) resolves
-    to nothing and is appended to `dangling` (a normal sync-lag state, warned by
-    lint, never an error).
+    Keyed by 1-based position in the stream; supersede refs are stored as the
+    numeric entry number they point at.
 
     A dict, not a set: a verbatim read that hits a stale ruling must point
     FORWARD to its replacement, or the "never paraphrased" path serves the
@@ -537,21 +415,14 @@ def _superseded(entries: list[str], ids: list[str] | None = None,
     walks the chain to its live head — a one-hop pointer would serve an
     intermediate (itself-superseded) entry as if current.
     """
-    idpos = {sid: i for i, sid in enumerate(ids, start=1)} if ids is not None else None
     direct: dict[int, int] = {}
     for j, ln in enumerate(entries, start=1):
         p = _parse(ln)
         if p and "sup=" in p[2]:
             for ref in _sup_refs(p[2]):
-                if idpos is None:
-                    pos = int(ref) if ref.isdigit() else None
-                else:
-                    pos = idpos.get(ref)
-                if pos is None:
-                    if dangling is not None:
-                        dangling.append((j, ref))
+                if not ref.isdigit():
                     continue
-                direct[pos] = j
+                direct[int(ref)] = j
     out: dict[int, int] = {}
     for n in direct:
         j, seen = direct[n], {n}
@@ -562,9 +433,8 @@ def _superseded(entries: list[str], ids: list[str] | None = None,
     return out
 
 
-def _fmt(idx: int, line: str, superseded: dict[int, int] | None = None,
-        ids: list[str] | None = None) -> str:
-    disp = _did(ids, idx)
+def _fmt(idx: int, line: str, superseded: dict[int, int] | None = None) -> str:
+    disp = str(idx)
     p = _parse(line)
     if not p:
         return f"#{disp} {line}"
@@ -579,7 +449,7 @@ def _fmt(idx: int, line: str, superseded: dict[int, int] | None = None,
     if "sup=" in meta:
         tail += " (supersedes " + ", ".join(f"#{r}" for r in _sup_refs(meta)) + ")"
     if superseded and idx in superseded:
-        tail += f" [SUPERSEDED by #{_did(ids, superseded[idx])}]"
+        tail += f" [SUPERSEDED by #{superseded[idx]}]"
     return f"#{disp} {ts} [{typ}] {text}{tail}"
 
 
@@ -857,38 +727,21 @@ def cmd_note(args) -> int:
               "match? `--force-type`.", file=sys.stderr)
         return 1
     scope = args.project or "global"
-    shared = _is_shared(scope)
-    writer = _writer_id() if shared else None
     entries = _read_entries(scope)
-    ids = _ids_for(scope)
     meta = ""
-    # `refs` holds the supersede reference ids exactly as they are stored (numeric
-    # strings for a solo scope, "<writer>:<seq>" for a shared one). `ref_positions`
-    # is their 1-based folded positions, for the position-keyed pin-budget math.
+    # `refs` holds the numeric supersede reference ids; `ref_positions` is their
+    # 1-based positions, for the position-keyed pin-budget math.
     refs: list[str] = []
     ref_positions: set[int] = set()
     if args.supersedes:
-        if shared:
-            idset = set(ids or [])
-            refs = [r.lstrip("#") for r in re.split(r"[,\s]+", args.supersedes.strip()) if r]
-            bad = [r for r in refs if r not in idset]
-            if bad:
-                print(f"error: --supersedes id(s) not found in {scope}: {', '.join(bad)}\n"
-                      "  a shared scope references entries by their stable id "
-                      "(<writer>:<seq>, or a legacy number) — a target you cannot see "
-                      "yet (an unsynced spool) cannot be superseded from here.",
-                      file=sys.stderr)
-                return 1
-            ref_positions = {ids.index(r) + 1 for r in refs}
-        else:
-            num = [int(x) for x in re.findall(r"\d+", args.supersedes)]
-            bad = [r for r in num if r < 1 or r > len(entries)]
-            if bad:
-                print(f"error: --supersedes out of range for {scope} (1-{len(entries)}): {bad}",
-                      file=sys.stderr)
-                return 1
-            refs = [str(r) for r in num]
-            ref_positions = set(num)
+        num = [int(x) for x in re.findall(r"\d+", args.supersedes)]
+        bad = [r for r in num if r < 1 or r > len(entries)]
+        if bad:
+            print(f"error: --supersedes out of range for {scope} (1-{len(entries)}): {bad}",
+                  file=sys.stderr)
+            return 1
+        refs = [str(r) for r in num]
+        ref_positions = set(num)
         if not refs:
             print("error: --supersedes needs entry numbers", file=sys.stderr)
             return 1
@@ -898,7 +751,7 @@ def cmd_note(args) -> int:
     # wake, so their budget is real context, enforced like the per-type caps.
     # A pin this write supersedes frees its chars first (refs drop from live).
     if pin:
-        dead_now = _superseded(entries, ids)
+        dead_now = _superseded(entries)
         used = 0
         for i, ln in enumerate(entries, start=1):
             if i in dead_now or i in ref_positions:
@@ -919,7 +772,7 @@ def cmd_note(args) -> int:
     # its own supersedes, so retiring a hazard is never blocked.
     recurrence: list[tuple[float, int, str]] = []
     if not refs and not getattr(args, "distinct", False):
-        dead_now = _superseded(entries, ids)
+        dead_now = _superseded(entries)
         hits = _near_duplicates(entries, dead_now, typ, text)
         if typ == "papercut":
             # Inverted on purpose: for every other type a duplicate is pollution,
@@ -933,13 +786,13 @@ def cmd_note(args) -> int:
                   "entries that disagree is the failure this gate exists to stop.",
                   file=sys.stderr)
             for score, i, ln in blocking[:DUP_SHOW]:
-                print(f"  {score:.2f}  {_fmt(i, ln, ids=ids)}", file=sys.stderr)
+                print(f"  {score:.2f}  {_fmt(i, ln)}", file=sys.stderr)
             print("Corrects one of them? `--supersedes N` (the old entry drops out of "
                   "the live index, the stream keeps it).\nGenuinely a separate fact? "
                   "`--distinct`.", file=sys.stderr)
             return 1
         for score, i, ln in hits[:DUP_SHOW]:
-            print(f"(related, {score:.2f}: {_fmt(i, ln, ids=ids)[:160]})", file=sys.stderr)
+            print(f"(related, {score:.2f}: {_fmt(i, ln)[:160]})", file=sys.stderr)
     # ---- src: the citation axis ------------------------------------------
     # Points at the evidence OUTSIDE the stream (commit sha, file path, deep
     # doc, url). Convention, not a gate: entries without one are fine.
@@ -966,34 +819,16 @@ def cmd_note(args) -> int:
     os.makedirs(STREAM_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%dT%H:%M")
     line = f"{ts} | {typ} | {meta} | {text}\n" if meta else f"{ts} | {typ} | {text}\n"
-    # Solo -> the one <scope>.log. Shared -> this writer's own spool ONLY, so no
-    # two machines ever touch the same file on the sync folder.
-    if shared:
-        os.makedirs(_spool_dir(scope), exist_ok=True)
-        path = _spool_path(scope, writer)
-        new_seq = len(_read_file_lines(path)) + 1
-        new_id = f"{writer}:{new_seq}"
-        commit_paths = [f"stream/{scope}/{writer}.log", f"tree/{scope}"]
-    else:
-        path = _scope_path(scope)
-        commit_paths = [f"stream/{scope}.log", f"tree/{scope}"]
+    path = _scope_path(scope)
+    commit_paths = [f"stream/{scope}.log", f"tree/{scope}"]
     append_with_retry(path, line)
-    # Re-fold after the write: the new entry's display position (and, for a shared
-    # scope, its stable id) is read back from the fold, never assumed.
-    new_ids = _ids_for(scope)
-    if shared:
-        entry_id = new_id                       # stable "<writer>:<seq>"
-        n = (new_ids.index(new_id) + 1) if new_ids and new_id in new_ids \
-            else len(_read_entries(scope))
-    else:
-        n = len(_read_entries(scope))
-        entry_id = n
-    disp = _did(new_ids, n)
+    n = len(_read_entries(scope))
+    disp = str(n)
     if getattr(args, "subsystem", None):
         if typ in STANDING_TYPES:
-            label = _snap_label(set(_load_labels(scope, new_ids).values()),
+            label = _snap_label(set(_load_labels(scope).values()),
                                 args.subsystem.strip().lower()[:40])
-            _append_labels(scope, [(entry_id, label)])
+            _append_labels(scope, [(n, label)])
         else:
             print("(--subsystem ignored: only standing entries — gotcha/dead-end/"
                   "invariant — carry labels)", file=sys.stderr)
@@ -1005,7 +840,7 @@ def cmd_note(args) -> int:
         print(f"\nThis is the {times}{suffix} time this "
               f"papercut has been logged in {scope}:", file=sys.stderr)
         for _score, i, ln in recurrence[:DUP_SHOW]:
-            print(f"  {_fmt(i, ln, ids=new_ids)[:150]}", file=sys.stderr)
+            print(f"  {_fmt(i, ln)[:150]}", file=sys.stderr)
         if times >= PAPERCUT_PROMOTE:
             print(f"Recurring {times}x is the evidence that it is worth fixing — put "
                   f"it on the ticket board now:\n  python {_tickets_cli()} open "
@@ -1025,66 +860,25 @@ def cmd_resolve(args) -> int:
     the live index while the stream keeps the original verbatim."""
     scope = args.project or "global"
     entries = _read_entries(scope)
-    ids = _ids_for(scope)
     token = str(args.entry).lstrip("#")
-    if ids is not None:
-        # Shared scope: the argument is a stable id ("<writer>:<seq>" or a legacy
-        # number). Resolve it to a folded position.
-        if token not in ids:
-            print(f"error: no entry {token} in {scope}", file=sys.stderr)
-            return 1
-        pos = ids.index(token) + 1
-    else:
-        if not token.isdigit():
-            print(f"error: entry must be a number for {scope}", file=sys.stderr)
-            return 1
-        pos = int(token)
-        if pos < 1 or pos > len(entries):
-            print(f"error: entry out of range for {scope} (1-{len(entries)})", file=sys.stderr)
-            return 1
+    if not token.isdigit():
+        print(f"error: entry must be a number for {scope}", file=sys.stderr)
+        return 1
+    pos = int(token)
+    if pos < 1 or pos > len(entries):
+        print(f"error: entry out of range for {scope} (1-{len(entries)})", file=sys.stderr)
+        return 1
     if not (_is_hazard(entries[pos - 1]) or _is_papercut(entries[pos - 1])):
         print(f"error: #{token} is not a hazard or papercut — retire an invariant or "
               "stale state entry with `brain note --supersedes N`", file=sys.stderr)
         return 1
-    if pos in _superseded(entries, ids):
+    if pos in _superseded(entries):
         print(f"error: #{token} is already resolved", file=sys.stderr)
         return 1
     args.type = "milestone"
     args.supersedes = token
     args.text = ["resolved", f"#{token}:"] + args.text
     return cmd_note(args)
-
-
-# ---------------------------------------------------------------- share
-
-def cmd_share(args) -> int:
-    """Convert a solo scope to the multi-writer (sync-folder) layout.
-
-    Opt-in and one-way: the existing stream/<scope>.log is FROZEN as read-only
-    legacy history (its entries keep their numeric ids forever, guaranteed stable
-    by the freeze) and a stream/<scope>/ directory is created. From now on every
-    machine appends only to its own spool, stream/<scope>/<writer>.log, so no two
-    machines ever write the same file — structurally conflict-free on OneDrive /
-    Dropbox / any sync folder. Read paths fold the frozen log and all spools
-    deterministically; nothing about a solo scope changes."""
-    scope = getattr(args, "scope", None) or getattr(args, "project", None) or "global"
-    if _is_shared(scope):
-        print(f"{scope} is already a shared scope "
-              f"(writers: {', '.join(_spool_writers(scope)) or 'none yet'}).")
-        return 0
-    frozen = len(_read_file_lines(_scope_path(scope)))
-    os.makedirs(_spool_dir(scope), exist_ok=True)
-    # A marker keeps the spool dir non-empty (so it survives git and a folder
-    # copy even before the first note) and records what the conversion froze.
-    with open(os.path.join(_spool_dir(scope), ".shared"), "w", encoding="utf-8") as f:
-        f.write(f"frozen-legacy-entries: {frozen}\n")
-    writer = _writer_id()
-    print(f"shared: {scope} — froze {frozen} legacy entr"
-          f"{'y' if frozen == 1 else 'ies'} in stream/{scope}.log (read-only history). "
-          f"New notes append to stream/{scope}/<writer>.log; this machine writes as "
-          f"'{writer}'.")
-    _git_commit([f"stream/{scope}", f"stream/{scope}.log"], f"brain: share {scope}")
-    return 0
 
 
 # ---------------------------------------------------------------- tree readers
@@ -1142,38 +936,26 @@ def _hazard_tsv(scope: str) -> str:
     return os.path.join(TREE_DIR, scope, "hazards.tsv")
 
 
-def _load_labels(scope: str, ids: list[str] | None = None) -> dict[int, str]:
-    """Subsystem labels keyed by 1-based folded POSITION (so the positional render
-    code consumes them directly). The hazards.tsv stores them by STABLE id: a
-    numeric id for a solo/legacy entry, "<writer>:<seq>" for a spool entry. For a
-    shared scope the stored id is translated to its current position through the
-    fold; an entry whose spool hasn't synced yet simply drops out until it does."""
-    if ids is None and _is_shared(scope):
-        ids = _fold(scope)[1]
+def _load_labels(scope: str) -> dict[int, str]:
+    """Subsystem labels keyed by 1-based entry POSITION (so the positional render
+    code consumes them directly). The hazards.tsv stores them by numeric id."""
     out: dict[int, str] = {}
     path = _hazard_tsv(scope)
     if not os.path.isfile(path):
         return out
-    idpos = {sid: i for i, sid in enumerate(ids, start=1)} if ids is not None else None
     with open(path, "r", encoding="utf-8") as f:
         for ln in f:
             parts = ln.rstrip("\n").split("\t")
             if len(parts) != 2:
                 continue
             key, label = parts[0], parts[1].strip()
-            if idpos is None:
-                if key.isdigit():
-                    out[int(key)] = label
-            else:
-                pos = idpos.get(key)
-                if pos is not None:
-                    out[pos] = label
+            if key.isdigit():
+                out[int(key)] = label
     return out
 
 
-def _append_labels(scope: str, rows: list[tuple[object, str]]) -> None:
-    """Append (id, label) pairs to hazards.tsv. `id` is a numeric position for a
-    solo scope, a stable id string ("writer:seq") for a shared one."""
+def _append_labels(scope: str, rows: list[tuple[int, str]]) -> None:
+    """Append (position, label) pairs to hazards.tsv."""
     os.makedirs(os.path.join(TREE_DIR, scope), exist_ok=True)
     with open(_hazard_tsv(scope), "a", encoding="utf-8") as f:
         for idx, label in rows:
@@ -1213,13 +995,12 @@ def _label_standing(scope: str, entries: list[str]) -> dict[int, str]:
     (--subsystem is required), so this only backfills the rare standing entry
     without one (a dead-end, which does not require a subsystem). Deterministic:
     no model call — an unlabelled standing entry defaults to 'unsorted'."""
-    ids = _ids_for(scope)
-    labels = _load_labels(scope, ids)
+    labels = _load_labels(scope)
     todo = [i for i, ln in enumerate(entries, start=1)
             if _is_standing(ln) and i not in labels]
     if not todo:
         return labels
-    _append_labels(scope, [(_did(ids, i), "unsorted") for i in todo])
+    _append_labels(scope, [(i, "unsorted") for i in todo])
     labels.update({i: "unsorted" for i in todo})
     return labels
 
@@ -1227,8 +1008,7 @@ def _label_standing(scope: str, entries: list[str]) -> dict[int, str]:
 def _render_index(scope: str, entries: list[str], labels: dict[int, str],
                   types: tuple, noun: str, pull_cmd: str,
                   pattern: str | None = None, dead: set[int] | None = None,
-                  budget: int = 0, prefer: str = "",
-                  ids: list[str] | None = None) -> str:
+                  budget: int = 0, prefer: str = "") -> str:
     """Verbatim subsystem-grouped index over the given standing types.
 
     With a budget: groups stay whole (an entry is never cut mid-line); when the
@@ -1262,7 +1042,7 @@ def _render_index(scope: str, entries: list[str], labels: dict[int, str],
 
     def block(label: str) -> str:
         return "\n".join([f"\n**{label}** ({len(groups[label])})"]
-                         + [f"- {_fmt(i, entries[i - 1], ids=ids)}" for i in groups[label]])
+                         + [f"- {_fmt(i, entries[i - 1])}" for i in groups[label]])
 
     order = sorted(groups, key=lambda k: (-len(groups[k]), k))
     full = "\n".join([header] + [block(lb) for lb in order])
@@ -1305,7 +1085,7 @@ def _render_index(scope: str, entries: list[str], labels: dict[int, str],
     # first. `kept` is already in that order.
     lines = [header] + [block(lb) for lb in kept]
     digest = "; ".join(
-        f"{lb} ({', '.join(f'#{_did(ids, i)}' for i in groups[lb][:6])}"
+        f"{lb} ({', '.join(f'#{i}' for i in groups[lb][:6])}"
         + (", …" if len(groups[lb]) > 6 else "") + ")"
         for lb in digested)
     lines.append(f"\n[over budget — {n_digested} entries in digest only: {digest}. "
@@ -1315,12 +1095,10 @@ def _render_index(scope: str, entries: list[str], labels: dict[int, str],
 
 def _render_hazards(scope: str, entries: list[str], labels: dict[int, str],
                     pattern: str | None = None, dead: set[int] | None = None,
-                    budget: int = 0, prefer: str = "",
-                    ids: list[str] | None = None) -> str:
+                    budget: int = 0, prefer: str = "") -> str:
     return _render_index(scope, entries, labels, HAZARD_TYPES,
                          "hazard (gotcha / dead-end)",
-                         f"brain hazards --scope {scope}", pattern, dead, budget, prefer,
-                         ids)
+                         f"brain hazards --scope {scope}", pattern, dead, budget, prefer)
 
 
 def _render_xcut(exclude_scope: str, cap: int = 1200) -> str:
@@ -1331,16 +1109,15 @@ def _render_xcut(exclude_scope: str, cap: int = 1200) -> str:
     for s in _scopes():
         if s == exclude_scope:
             continue
-        ids = _ids_for(s)
-        labels = _load_labels(s, ids)
+        labels = _load_labels(s)
         starred = {i for i, lb in labels.items() if lb.startswith("*")}
         if not starred:
             continue
         entries = _read_entries(s)
-        dead = _superseded(entries, ids)
+        dead = _superseded(entries)
         for i in sorted(starred):
             if i <= len(entries) and i not in dead and _is_standing(entries[i - 1]):
-                rows.append((s, i, f"- {s} [{labels[i]}] {_fmt(i, entries[i - 1], ids=ids)}"))
+                rows.append((s, i, f"- {s} [{labels[i]}] {_fmt(i, entries[i - 1])}"))
     if not rows:
         return ""
     rows.sort(key=lambda r: -r[1])  # newest first within the cap
@@ -1359,10 +1136,10 @@ def _render_xcut(exclude_scope: str, cap: int = 1200) -> str:
 
 def _render_invariants(scope: str, entries: list[str], labels: dict[int, str],
                        pattern: str | None = None, dead: set[int] | None = None,
-                       budget: int = 0, ids: list[str] | None = None) -> str:
+                       budget: int = 0) -> str:
     return _render_index(scope, entries, labels, ("invariant",),
                          "invariant (must stay true)",
-                         f"brain design --scope {scope}", pattern, dead, budget, "", ids)
+                         f"brain design --scope {scope}", pattern, dead, budget, "")
 
 
 def _live_pins(entries: list[str], dead) -> list[int]:
@@ -1371,7 +1148,7 @@ def _live_pins(entries: list[str], dead) -> list[int]:
             if _is_pinned(ln) and (not dead or i not in dead)]
 
 
-def _render_pins(entries: list[str], dead, ids: list[str] | None = None) -> str:
+def _render_pins(entries: list[str], dead) -> str:
     """The identity-pin block: live pins VERBATIM, labelled plainly. Empty string
     when the scope has no live pins. Rendered at the very top of wake and root —
     never trimmed, never summarized."""
@@ -1379,7 +1156,7 @@ def _render_pins(entries: list[str], dead, ids: list[str] | None = None) -> str:
     if not idxs:
         return ""
     lines = ["Pinned facts (always loaded):"]
-    lines += [f"- {_fmt(i, entries[i - 1], ids=ids)}" for i in idxs]
+    lines += [f"- {_fmt(i, entries[i - 1])}" for i in idxs]
     return "\n".join(lines)
 
 
@@ -1484,8 +1261,7 @@ def _hazard_path_matches(scope: str, path: str,
     with the edited path's subsystem tokens. Whole-word (set intersection), so a
     path token 'amount' matches the word 'amount' but not the substring in
     'amounts'. Superseded and excluded (already-injected) entries drop out;
-    `exclude` holds display ids as strings — numeric for a solo scope,
-    writer:seq for a shared one — matching what MATCHED-IDS emits.
+    `exclude` holds numeric entry ids as strings — matching what MATCHED-IDS emits.
 
     Cheap: one linear pass over the stream, no LLM. This is the retrieval axis the
     just-in-time hazard gate keys on — a session editing a subsystem is shown the
@@ -1504,9 +1280,8 @@ def _hazard_path_matches(scope: str, path: str,
         return []
     exclude = exclude or set()
     entries = _read_entries(scope)
-    ids = _ids_for(scope)
-    dead = _superseded(entries, ids)
-    labels = _load_labels(scope, ids)
+    dead = _superseded(entries)
+    labels = _load_labels(scope)
     # (matched-token count, id, line): rank by how many DISTINCT path tokens the
     # entry hits, so relevance — not stream position — decides what survives the
     # MATCH_CAP truncation. A file naming two subsystems surfaces the hazard that
@@ -1515,7 +1290,7 @@ def _hazard_path_matches(scope: str, path: str,
     # flooding common token could push a genuinely relevant hazard past the cap.
     scored: list[tuple[int, int, str]] = []
     for i, ln in enumerate(entries, start=1):
-        if i in dead or _did(ids, i) in exclude or not _is_hazard(ln):
+        if i in dead or str(i) in exclude or not _is_hazard(ln):
             continue
         p = _parse(ln)
         if not p:
@@ -1533,27 +1308,24 @@ def cmd_hazards(args) -> int:
     match_path = getattr(args, "match_path", None)
     if match_path:
         scope = args.scope or "global"
-        # Both display-id forms: numeric (solo/legacy) and writer:seq (shared).
-        exclude = set(re.findall(r"[a-z0-9._-]+:\d+|\d+",
-                                 (getattr(args, "exclude", "") or "").lower()))
+        exclude = set(re.findall(r"\d+", getattr(args, "exclude", "") or ""))
         matched = _hazard_path_matches(scope, match_path, exclude)
         if not matched:
             return 0  # silent: nothing in this scope keys to the edited path
         entries = _read_entries(scope)
-        ids = _ids_for(scope)
-        labels = _load_labels(scope, ids)
+        labels = _load_labels(scope)
         capped = matched[:MATCH_CAP]
         print(f"[BRAIN HAZARDS scope={scope} match-path]")
         print(f"{len(matched)} live hazard(s) key to the file you just edited "
               f"(verbatim; whole-word path match — never summarized):")
         for i, ln in capped:
             lb = labels.get(i, "")
-            print(f"- {('[' + lb + '] ') if lb else ''}{_fmt(i, entries[i - 1], ids=ids)}")
+            print(f"- {('[' + lb + '] ') if lb else ''}{_fmt(i, entries[i - 1])}")
         if len(matched) > len(capped):
             print(f"  (+{len(matched) - len(capped)} more match — "
                   f"`brain hazards --scope {scope}`)")
         # Machine line the just-in-time gate reads to dedupe once-per-hazard.
-        print("MATCHED-IDS: " + ",".join(_did(ids, i) for i, _ in capped))
+        print("MATCHED-IDS: " + ",".join(str(i) for i, _ in capped))
         return 0
     scopes = [args.scope] if args.scope else _scopes()
     shown = 0
@@ -1561,11 +1333,10 @@ def cmd_hazards(args) -> int:
         entries = _read_entries(s)
         if not any(_is_hazard(ln) for ln in entries):
             continue
-        ids = _ids_for(s)
         print(f"[BRAIN HAZARDS scope={s}]")
-        print(_render_hazards(s, entries, _load_labels(s, ids), args.grep,
-                              _superseded(entries, ids), args.budget or 0,
-                              getattr(args, "prefer", "") or "", ids))
+        print(_render_hazards(s, entries, _load_labels(s), args.grep,
+                              _superseded(entries), args.budget or 0,
+                              getattr(args, "prefer", "") or ""))
         if args.scope and not args.grep:
             xcut = _render_xcut(s)
             if xcut:
@@ -1587,10 +1358,9 @@ def cmd_design(args) -> int:
         entries = _read_entries(s)
         if not any(_parse(ln) and _parse(ln)[1] == "invariant" for ln in entries):
             continue
-        ids = _ids_for(s)
         print(f"[BRAIN DESIGN scope={s}]")
-        print(_render_invariants(s, entries, _load_labels(s, ids), args.grep,
-                                 _superseded(entries, ids), args.budget or 0, ids))
+        print(_render_invariants(s, entries, _load_labels(s), args.grep,
+                                 _superseded(entries), args.budget or 0))
         print()
         shown += 1
     if not shown:
@@ -1615,11 +1385,10 @@ def cmd_wake(args) -> int:
         else:
             print(f"[BRAIN WAKE scope={scope}] empty stream.")
         return 0
-    ids = _ids_for(scope)
-    dead = _superseded(entries, ids)
+    dead = _superseded(entries)
     # Pinned identity facts render VERBATIM at the very top, above the computed
     # state — always loaded, never trimmed, never summarized (§3).
-    pins = _render_pins(entries, dead, ids)
+    pins = _render_pins(entries, dead)
     # State is COMPUTED at wake time, not model-summarized (design ruling
     # 2026-08-16): live rulings straight from the stream, supersede-resolved,
     # verbatim, newest first. It can never be stale and costs no model call;
@@ -1639,7 +1408,7 @@ def cmd_wake(args) -> int:
     # static sentence the injection used to carry now lives in ~/.claude/CLAUDE.md;
     # the hook owns the board, inbox, user model, ordering, and the total cap.
     if inject:
-        return _wake_inject(scope, entries, dead, ids, pins,
+        return _wake_inject(scope, entries, dead, pins,
                             live_state, mile, haz, inv, n)
 
     if pins:
@@ -1650,7 +1419,7 @@ def cmd_wake(args) -> int:
           f"(long rulings clipped — `brain decisions` for full text):")
     shown_state, used = [], 0
     for i, p in reversed(live_state):
-        line = _fmt(i, entries[i - 1], dead, ids)
+        line = _fmt(i, entries[i - 1], dead)
         if len(line) > 300:
             line = line[:297] + "..."
         if used + len(line) > WAKE_STATE_CHARS:
@@ -1663,7 +1432,7 @@ def cmd_wake(args) -> int:
     if older:
         print(f"   (+{older} older live rulings: brain decisions --scope {scope})")
     if mile:
-        recent = "; ".join(f"#{_did(ids, i)} {p[3][:70]}" for i, p in mile[-3:])
+        recent = "; ".join(f"#{i} {p[3][:70]}" for i, p in mile[-3:])
         print(f"   recent milestones: {recent}")
     counts: dict[str, int] = {}
     for ln in entries:
@@ -1723,7 +1492,7 @@ def cmd_wake(args) -> int:
     return 0
 
 
-def _wake_inject(scope, entries, dead, ids, pins, live_state, mile,
+def _wake_inject(scope, entries, dead, pins, live_state, mile,
                  haz, inv, n) -> int:
     """`brain wake --inject`: sections 1 (header + pins) and 5 (computed STATE)
     only. No pull map, no board, no transcript pointer, no "up to date" list.
@@ -1738,7 +1507,7 @@ def _wake_inject(scope, entries, dead, ids, pins, live_state, mile,
     # Section 5 — newest live rulings, clipped to 200 chars, 1500-char budget.
     shown, used = [], 0
     for i, p in reversed(live_state):
-        line = _fmt(i, entries[i - 1], dead, ids)
+        line = _fmt(i, entries[i - 1], dead)
         if len(line) > INJECT_CLIP:
             line = line[:INJECT_CLIP - 3] + "..."
         if used + len(line) > INJECT_STATE_CHARS:
@@ -1754,7 +1523,7 @@ def _wake_inject(scope, entries, dead, ids, pins, live_state, mile,
     if older:
         print(f"   (+{older} older: brain decisions --scope {scope})")
     if mile:
-        recent = "; ".join(f"#{_did(ids, i)} {p[3][:70]}" for i, p in mile[-3:])
+        recent = "; ".join(f"#{i} {p[3][:70]}" for i, p in mile[-3:])
         print(f"   recent milestones: {recent}")
     deep_dir = os.path.join(KB_ROOT, "projects", scope)
     if os.path.isdir(deep_dir):
@@ -1789,14 +1558,13 @@ def cmd_zoom(args) -> int:
     if not entries:
         print(f"(scope {args.scope} is empty)")
         return 0
-    ids = _ids_for(args.scope)
-    dead = _superseded(entries, ids)
+    dead = _superseded(entries)
     lo = max(1, lo)
     hi = min(len(entries), hi)
     # Display in effective-date order (asof if present, else ts); #numbers are
     # identity and stay write-order.
     for i in _order_by_date(range(lo, hi + 1), entries):
-        print(_fmt(i, entries[i - 1], dead, ids))
+        print(_fmt(i, entries[i - 1], dead))
     return 0
 
 
@@ -1818,12 +1586,11 @@ def cmd_view(args, typ: str) -> int:
     rows = []
     for s in scopes:
         entries = _read_entries(s)
-        ids = _ids_for(s)
-        dead = _superseded(entries, ids)
+        dead = _superseded(entries)
         for i, ln in enumerate(entries, start=1):
             p = _parse(ln)
             if p and p[1] == typ:
-                rows.append((_effective_date(ln), s, i, ln, dead, ids))
+                rows.append((_effective_date(ln), s, i, ln, dead))
     rows.sort(key=lambda r: r[0])  # by effective date (asof if present, else ts)
     if not rows:
         print(f"(no {typ} entries)")
@@ -1831,8 +1598,8 @@ def cmd_view(args, typ: str) -> int:
     cap = args.recent or VIEW_DEFAULT_RECENT
     withheld = max(0, len(rows) - cap)
     rows = rows[-cap:]
-    for _ts, s, i, ln, dead, ids in rows:
-        print(f"{s} {_fmt(i, ln, dead, ids)}")
+    for _ts, s, i, ln, dead in rows:
+        print(f"{s} {_fmt(i, ln, dead)}")
     if withheld:
         print(f"\n({withheld} older {typ} entries withheld — `-n {len(rows) + withheld}` "
               f"for all, or `brain grep RX`)")
@@ -1852,29 +1619,28 @@ def cmd_grep(args) -> int:
     # not itself a printed hit. grep already shows the dead line (flagged
     # [SUPERSEDED by #N]); the anti-hit adds the head's TEXT so the correction is
     # legible without a second lookup.
-    anti: dict[tuple[str, int], tuple[int, str, list[str] | None]] = {}
+    anti: dict[tuple[str, int], tuple[int, str]] = {}
     for s in scopes:
         entries = _read_entries(s)
-        sids = _ids_for(s)
-        dead = _superseded(entries, sids)
+        dead = _superseded(entries)
         for i, ln in enumerate(entries, start=1):
             if rx.search(ln):
-                print(f"{s} {_fmt(i, ln, dead, sids)}")
+                print(f"{s} {_fmt(i, ln, dead)}")
                 hits += 1
                 printed.add((s, i))
                 if i in dead:
                     head = dead[i]
                     key = (s, head)
                     if key not in anti:
-                        anti[key] = (i, entries[head - 1], sids)
+                        anti[key] = (i, entries[head - 1])
     anti_rows = []
-    for (s, head), (dead_i, head_ln, sids) in sorted(anti.items(),
-                                                     key=lambda kv: (kv[0][0], kv[1][0])):
+    for (s, head), (dead_i, head_ln) in sorted(anti.items(),
+                                               key=lambda kv: (kv[0][0], kv[1][0])):
         if len(anti_rows) >= ANTIHIT_MAX:
             break
         if (s, head) in printed:                # live head already shown verbatim
             continue
-        anti_rows.append(f"{s} {_antihit_line(_did(sids, dead_i), _did(sids, head), head_ln)}")
+        anti_rows.append(f"{s} {_antihit_line(dead_i, head, head_ln)}")
     if not hits:
         print("(no matches)")
     for row in anti_rows:
@@ -1896,24 +1662,23 @@ def cmd_papercuts(args) -> int:
     rows = []
     for s in scopes:
         entries = _read_entries(s)
-        sids = _ids_for(s)
-        dead = _superseded(entries, sids)
+        dead = _superseded(entries)
         for i, ln in enumerate(entries, start=1):
             if _is_papercut(ln) and i not in dead:
-                rows.append((s, i, ln, sids))
+                rows.append((s, i, ln))
     if not rows:
         print("(no open papercuts)")
         return 0
     # Cluster near-duplicates so recurrence reads at a glance.
-    clusters: list[list[tuple[str, int, str, list[str] | None]]] = []
-    for s, i, ln, sids in rows:
+    clusters: list[list[tuple[str, int, str]]] = []
+    for s, i, ln in rows:
         toks = _dup_tokens(_parse(ln)[3])
         for cl in clusters:
             if cl[0][0] == s and _dup_score(toks, _dup_tokens(_parse(cl[0][2])[3])) >= DUP_BLOCK:
-                cl.append((s, i, ln, sids))
+                cl.append((s, i, ln))
                 break
         else:
-            clusters.append([(s, i, ln, sids)])
+            clusters.append([(s, i, ln)])
     clusters.sort(key=lambda c: (-len(c), c[0][0], c[0][1]))
     hot = [c for c in clusters if len(c) >= PAPERCUT_PROMOTE]
     print(f"{len(rows)} open papercut(s) in {len({r[0] for r in rows})} scope(s)"
@@ -1922,9 +1687,9 @@ def cmd_papercuts(args) -> int:
     for cl in clusters:
         if len(cl) > 1:
             print(f"\n  [{cl[0][0]}] recurred {len(cl)}x:")
-        for s, i, ln, sids in cl:
-            print(f"    {s} {_fmt(i, ln, ids=sids)}" if len(cl) > 1
-                  else f"  {s} {_fmt(i, ln, ids=sids)}")
+        for s, i, ln in cl:
+            print(f"    {s} {_fmt(i, ln)}" if len(cl) > 1
+                  else f"  {s} {_fmt(i, ln)}")
     print(f"\nPromote: open a ticket (`python {_tickets_cli()} open \"...\" "
           f"--root {TICKETS_ROOT}`), then "
           "`brain resolve --project <s> N \"promoted to ticket PROJ-NN\"`. "
@@ -2054,8 +1819,7 @@ ANTIHIT_CLIP = 140       # live-head text clip length
 def _antihit_line(dead_id: object, head_id: object, head_line: str) -> str:
     """One forward-pointer line: `~ #<dead> superseded by #<head> [type]: <head text>`.
     Only the LIVE head's text is shown, clipped; the dead text never appears.
-    `dead_id`/`head_id` are display ids (a position for a solo scope, a stable
-    "<writer>:<seq>" for a shared one)."""
+    `dead_id`/`head_id` are entry positions."""
     p = _parse(head_line)
     typ = p[1] if p else "?"
     text = " ".join((p[3] if p else head_line).split())
@@ -2071,7 +1835,7 @@ def cmd_recall(args) -> int:
     if not toks:
         return 0
     exclude = set()
-    for part in re.findall(r"[a-z0-9_-]+#[a-z0-9._:-]+", (getattr(args, "exclude", "") or "").lower()):
+    for part in re.findall(r"[a-z0-9_-]+#\d+", (getattr(args, "exclude", "") or "").lower()):
         exclude.add(part)
     scopes = [args.scope] if args.scope else _scopes()
     budget = getattr(args, "budget", 0) or 0
@@ -2079,13 +1843,12 @@ def cmd_recall(args) -> int:
     # Anti-hit candidates: a DEAD entry matched, so its live head carries the
     # correction. Keyed forward to (scope, head) — deduped there against real
     # hits and against sibling dead entries sharing the same head.
-    anti: dict[tuple[str, int], tuple[int, int, str, list[str] | None]] = {}
+    anti: dict[tuple[str, int], tuple[int, int, str]] = {}
     for s in scopes:
         entries = _read_entries(s)
-        sids = _ids_for(s)
-        dead = _superseded(entries, sids)
+        dead = _superseded(entries)
         for i, ln in enumerate(entries, start=1):
-            if f"{s}#{_did(sids, i)}" in exclude:
+            if f"{s}#{i}" in exclude:
                 continue
             p = _parse(ln)
             if not p or p[1] not in RECALL_TYPES:
@@ -2099,30 +1862,30 @@ def cmd_recall(args) -> int:
                 # Keep the strongest-scoring dead entry per live head; a shorter
                 # #dead loses to a stronger match on the same chain.
                 if key not in anti or score > anti[key][0]:
-                    anti[key] = (score, i, entries[head - 1], sids)
+                    anti[key] = (score, i, entries[head - 1])
                 continue
-            scored.append((score, s, i, ln, sids))
+            scored.append((score, s, i, ln))
     scored.sort(key=lambda r: (-r[0], -r[2]))
     kept, used, kept_ids_list = [], 0, []
-    for hits, s, i, ln, sids in scored[:RECALL_MAX]:
-        row = f"- [{s}] {_fmt(i, ln, ids=sids)}"
+    for hits, s, i, ln in scored[:RECALL_MAX]:
+        row = f"- [{s}] {_fmt(i, ln)}"
         if budget and used + len(row) > budget:
             break
         kept.append(row)
-        kept_ids_list.append(f"{s}#{_did(sids, i)}")
+        kept_ids_list.append(f"{s}#{i}")
         used += len(row) + 1
     # Anti-hits come AFTER real hits, share the same char budget, and cap at
     # ANTIHIT_MAX. Drop any whose live head is already a printed hit (no
     # duplicate) or was excluded as already-injected.
     kept_ids = set(kept_ids_list)
     anti_rows = []
-    for (s, head), (score, dead_i, head_ln, sids) in sorted(
+    for (s, head), (score, dead_i, head_ln) in sorted(
             anti.items(), key=lambda kv: (-kv[1][0], kv[0][0], kv[1][1])):
         if len(anti_rows) >= ANTIHIT_MAX:
             break
-        if f"{s}#{_did(sids, head)}" in kept_ids or f"{s}#{_did(sids, head)}" in exclude:
+        if f"{s}#{head}" in kept_ids or f"{s}#{head}" in exclude:
             continue
-        row = _antihit_line(_did(sids, dead_i), _did(sids, head), head_ln).replace("~ ", f"~ [{s}] ", 1)
+        row = _antihit_line(dead_i, head, head_ln).replace("~ ", f"~ [{s}] ", 1)
         if budget and used + len(row) > budget:
             break
         anti_rows.append(row)
@@ -2135,7 +1898,7 @@ def cmd_recall(args) -> int:
               "bearing on what you just raised — verbatim rulings, not a summary:")
         print("\n".join(kept))
         if withheld:
-            by_scope = sorted({s for _h, s, _i, _l, _sids in scored[len(kept):]})
+            by_scope = sorted({s for _h, s, _i, _l in scored[len(kept):]})
             print(f"({withheld} more in {', '.join(by_scope)} — "
                   f"`brain decisions --scope <s>` or `brain grep RX`)")
     if anti_rows:
@@ -2212,7 +1975,7 @@ def cmd_dispatch(args) -> int:
 # Branch gists and root state are deterministic; wake state is computed live.
 
 
-def _branch_gist(idx: int, line: str, ids: list[str] | None = None) -> str:
+def _branch_gist(idx: int, line: str) -> str:
     """One deterministic bullet for a state entry: type + the first clause of
     its text, clipped, ending with its citation [#id]. No model, no judgment —
     just a stable, greppable pointer back into the stream."""
@@ -2223,11 +1986,10 @@ def _branch_gist(idx: int, line: str, ids: list[str] | None = None) -> str:
     clip = re.split(r"(?<=[.;])\s", text, maxsplit=1)[0]
     if len(clip) > 140:
         clip = clip[:137].rstrip() + "…"
-    return f"- [{typ}] {clip} [#{_did(ids, idx)}]"
+    return f"- [{typ}] {clip} [#{idx}]"
 
 
-def _build_branches(scope: str, entries: list[str], dead: set[int], force: bool,
-                    ids: list[str] | None = None) -> bool:
+def _build_branches(scope: str, entries: list[str], dead: set[int], force: bool) -> bool:
     """Deterministic chrono gists over complete 32-entry chunks of the STATE
     path. A gist is one bullet per live state entry (type + first clause +
     citation) plus a header naming the type counts and date range. Regenerated
@@ -2262,15 +2024,14 @@ def _build_branches(scope: str, entries: list[str], dead: set[int], force: bool,
                 dates.append(d)
         span = f"{min(dates)}..{max(dates)}" if dates else "—"
         tallies = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
-        bullets = "\n".join(_branch_gist(i, entries[i - 1], ids) for i in srcs)
+        bullets = "\n".join(_branch_gist(i, entries[i - 1]) for i in srcs)
         with open(bpath, "w", encoding="utf-8") as f:
             f.write(f"---\nv: {BRANCH_VERSION}\ncovers: {lo}-{hi}\nsrcs: {want}\n---\n\n"
                     f"_{len(srcs)} state entries ({tallies}); {span}_\n\n{bullets}\n")
     return True
 
 
-def _build_root(scope: str, entries: list[str], dead: set[int],
-                ids: list[str] | None = None) -> bool:
+def _build_root(scope: str, entries: list[str], dead: set[int]) -> bool:
     """Root state = what is TRUE NOW, composed MECHANICALLY: pins verbatim on
     top, then the live state entries (decision/milestone/question, minus
     superseded) newest first as citation-bearing bullets, capped at
@@ -2282,7 +2043,7 @@ def _build_root(scope: str, entries: list[str], dead: set[int],
     branches = _branch_files(scope)
     live = _state_indices(entries, 1, n, dead)
     ordered = list(reversed(_order_by_date(live, entries)))  # newest first
-    pins = _render_pins(entries, dead, ids)
+    pins = _render_pins(entries, dead)
     ts = datetime.now().strftime("%Y-%m-%dT%H:%M")
     if not ordered:
         body = (pins + "\n") if pins else "(no state)\n"
@@ -2292,7 +2053,7 @@ def _build_root(scope: str, entries: list[str], dead: set[int],
                     + body)
         return True
     shown = ordered[:ROOT_MAX_LINES]
-    bullets = "\n".join(_branch_gist(i, entries[i - 1], ids) for i in shown)
+    bullets = "\n".join(_branch_gist(i, entries[i - 1]) for i in shown)
     if len(ordered) > len(shown):
         bullets += (f"\n- …(+{len(ordered) - len(shown)} older live rulings — "
                     f"`brain decisions --scope {scope}`)")
@@ -2308,17 +2069,16 @@ def _rebuild_scope(scope: str, force: bool) -> bool:
     entries = _read_entries(scope)
     if not entries:
         return True
-    ids = _ids_for(scope)
-    dead = _superseded(entries, ids)
-    if not _build_branches(scope, entries, dead, force, ids):
+    dead = _superseded(entries)
+    if not _build_branches(scope, entries, dead, force):
         return False
     labels = _label_standing(scope, entries)
-    haz = _render_hazards(scope, entries, labels, dead=dead, ids=ids)
+    haz = _render_hazards(scope, entries, labels, dead=dead)
     if not haz.startswith("(no live hazard"):
         os.makedirs(os.path.join(TREE_DIR, scope), exist_ok=True)
         with open(os.path.join(TREE_DIR, scope, "hazards.md"), "w", encoding="utf-8") as f:
             f.write(f"<!-- generated by brain rebuild; verbatim index, never hand-edit -->\n\n{haz}\n")
-    inv = _render_invariants(scope, entries, labels, dead=dead, ids=ids)
+    inv = _render_invariants(scope, entries, labels, dead=dead)
     if not inv.startswith("(no live invariant"):
         os.makedirs(os.path.join(TREE_DIR, scope), exist_ok=True)
         with open(os.path.join(TREE_DIR, scope, "design.md"), "w", encoding="utf-8") as f:
@@ -2326,7 +2086,7 @@ def _rebuild_scope(scope: str, force: bool) -> bool:
     wm, _gen, ver, _body, _head = _root_meta(scope)
     if not force and ver == ROOT_VERSION and wm >= len(entries):
         return True
-    return _build_root(scope, entries, dead, ids)
+    return _build_root(scope, entries, dead)
 
 
 def cmd_rebuild(args) -> int:
@@ -2375,32 +2135,18 @@ def _lint_scope(scope: str) -> list[str]:
     n = len(entries)
     if not n:
         return warns
-    ids = _ids_for(scope)
-    def did(k: int) -> str:
-        return _did(ids, k)
-    idpos = {sid: i for i, sid in enumerate(ids, start=1)} if ids is not None else None
     direct: dict[int, int] = {}
     for j, ln in enumerate(entries, start=1):
         p = _parse(ln)
         if not p:
-            warns.append(f"{scope} #{did(j)}: unparseable line")
+            warns.append(f"{scope} #{j}: unparseable line")
             continue
         if p[1] not in TYPES:
-            warns.append(f"{scope} #{did(j)}: unknown type '{p[1]}'")
+            warns.append(f"{scope} #{j}: unknown type '{p[1]}'")
         for ref in _sup_refs(p[2]):
-            if idpos is None:
-                r = int(ref) if ref.isdigit() else None
-            else:
-                r = idpos.get(ref)
-            if r is None:
-                # A ref to an id not (yet) present. On a shared scope this is a
-                # normal sync-lag state — a spool that hasn't arrived — so it is a
-                # WARNING, never an error. On a solo scope it is genuinely dangling.
-                if idpos is None:
-                    warns.append(f"{scope} #{did(j)}: supersedes #{ref} — out of range")
-                else:
-                    warns.append(f"{scope} #{did(j)}: supersedes #{ref} — no such id "
-                                 "yet (a spool not synced? sync lag is normal)")
+            r = int(ref) if ref.isdigit() else None
+            if r is None or r < 1 or r > n:
+                warns.append(f"{scope} #{j}: supersedes #{ref} — out of range")
                 continue
             direct[r] = j
             # Backfill correcting FORWARD in time is suspicious (not fatal):
@@ -2408,17 +2154,17 @@ def _lint_scope(scope: str) -> list[str]:
             # replaces usually means the asof dates are crossed.
             new_d, old_d = _effective_date(ln), _effective_date(entries[r - 1])
             if new_d and old_d and new_d < old_d:
-                warns.append(f"{scope} #{did(j)}: supersedes #{ref} which has a LATER "
+                warns.append(f"{scope} #{j}: supersedes #{ref} which has a LATER "
                              f"date ({old_d} > {new_d}) — check the asof dates")
     for start in direct:
         j, seen = direct[start], {start}
         while j in direct:
             if j in seen:
-                warns.append(f"{scope}: supersession cycle through #{did(j)}")
+                warns.append(f"{scope}: supersession cycle through #{j}")
                 break
             seen.add(j)
             j = direct[j]
-    dead = set(_superseded(entries, ids))
+    dead = set(_superseded(entries))
     # Every [#N] a generated view serves must resolve to a real, live entry.
     tdir = os.path.join(TREE_DIR, scope)
     files = [os.path.join(tdir, "root.md")] + [p for _, _, p in _branch_files(scope)]
@@ -2437,12 +2183,12 @@ def _lint_scope(scope: str) -> list[str]:
                 warns.append(f"{scope}/{name}: cites #{ref} — no such entry")
             elif ref in dead and name == "root.md":
                 warns.append(f"{scope}/root.md: cites superseded #{ref} — stale; rebuild")
-    labels = _load_labels(scope, ids)
+    labels = _load_labels(scope)
     for i in labels:
         if i < 1 or i > n:
-            warns.append(f"{scope}/hazards.tsv: label for nonexistent #{did(i)}")
+            warns.append(f"{scope}/hazards.tsv: label for nonexistent #{i}")
         elif not _is_standing(entries[i - 1]):
-            warns.append(f"{scope}/hazards.tsv: label on non-standing entry #{did(i)}")
+            warns.append(f"{scope}/hazards.tsv: label on non-standing entry #{i}")
     live = sorted({lb for i, lb in labels.items()
                    if 1 <= i <= n and i not in dead and _is_standing(entries[i - 1])})
     for a in range(len(live)):
@@ -2464,7 +2210,7 @@ def _lint_scope(scope: str) -> list[str]:
         except ValueError:
             continue
         if age > 120:
-            warns.append(f"{scope} #{did(i)}: invariant unconfirmed for {age}d — still true? "
+            warns.append(f"{scope} #{i}: invariant unconfirmed for {age}d — still true? "
                          "Supersede it (even with identical text) to re-date it")
     if len(live_inv) > 12:
         warns.append(f"{scope}: {len(live_inv)} live invariants — sprawl; 'invariant' "
@@ -2500,12 +2246,11 @@ def cmd_status(_args) -> int:
         return 0
     for s in scopes:
         entries = _read_entries(s)
-        ids = _ids_for(s)
         n = len(entries)
         wm, gen, ver, body, _head = _root_meta(s)
-        dead = _superseded(entries, ids)
+        dead = _superseded(entries)
         haz = [i for i, ln in enumerate(entries, start=1) if _is_hazard(ln)]
-        labels = _load_labels(s, ids)
+        labels = _load_labels(s)
         unl = len([i for i, ln in enumerate(entries, start=1)
                    if _is_standing(ln) and i not in labels])
         # Injected-footprint meter: context frugality is the system's reason
@@ -2513,60 +2258,14 @@ def cmd_status(_args) -> int:
         # visible before it becomes bloat.
         root_c = len(body or "")
         tail_c = sum(len(entries[i - 1]) for i in range(wm + 1, n + 1)) if n > wm else 0
-        haz_view = _render_hazards(s, entries, labels, dead=dead, ids=ids)
+        haz_view = _render_hazards(s, entries, labels, dead=dead)
         haz_c = 0 if haz_view.startswith("(no live") else len(haz_view)
         foot = f", push root {root_c}c + tail {min(tail_c, WAKE_TAIL_CHARS)}c + hazards {haz_c}c"
         if haz_c > 6000:
             foot += " (gate digests: over 6000c)"
-        shared_tag = f", shared: {len(_spool_writers(s))} writer(s)" if _is_shared(s) else ""
         print(f"{s}: {n} entries, watermark {wm} (root v{ver}, generated {gen or 'never'}), "
               f"{len(_branch_files(s))} branches, {len(haz)} hazards"
-              + (f" ({unl} unlabelled)" if unl else "") + foot + shared_tag)
-    return 0
-
-
-def cmd_sessions(args) -> int:
-    """Entries grouped by capture session — the denominator pilot criterion 1
-    never had. The Stop hook floor is 1 entry/code-changing session; anything
-    beyond that is voluntary capture, which is the number that matters."""
-    scopes = [args.scope] if args.scope else _scopes()
-    sess: dict[str, dict] = {}
-    unstamped = 0
-    for s in scopes:
-        for i, ln in enumerate(_read_entries(s), start=1):
-            p = _parse(ln)
-            if not p:
-                continue
-            sid = _meta_str(p[2], "sid")
-            if not sid:
-                unstamped += 1
-                continue
-            d = sess.setdefault(sid, {"first": p[0], "n": 0,
-                                      "scopes": set(), "types": {}})
-            d["n"] += 1
-            d["scopes"].add(s)
-            d["types"][p[1]] = d["types"].get(p[1], 0) + 1
-    if not sess:
-        print(f"(no session-stamped entries yet; {unstamped} pre-instrumentation)")
-        return 0
-    tax_only = 0
-    for sid, d in sorted(sess.items(), key=lambda kv: kv[1]["first"]):
-        types = ", ".join(f"{v} {k}" for k, v in sorted(d["types"].items()))
-        # Milestone-only capture is the Stop-hook-tax signature, not memory.
-        flag = ""
-        if set(d["types"]) == {"milestone"}:
-            flag = "  <- milestone-only (tax signature)"
-            tax_only += 1
-        print(f"{d['first']}  sid={sid}  {d['n']} entries ({types})  "
-              f"[{', '.join(sorted(d['scopes']))}]{flag}")
-    total = sum(d["n"] for d in sess.values())
-    voluntary = sum(d["n"] - 1 for d in sess.values())
-    print(f"\n{len(sess)} sessions, {total} entries "
-          f"({total / len(sess):.1f}/session; {voluntary} beyond the 1/session "
-          f"hook floor; {tax_only} milestone-only"
-          f"{f'; {unstamped} pre-instrumentation unstamped' if unstamped else ''})")
-    print("(capture-rate is a denominator, not a quality signal — the seeded-trap "
-          "replay is the quality proxy)")
+              + (f" ({unl} unlabelled)" if unl else "") + foot)
     return 0
 
 
@@ -3194,7 +2893,7 @@ def cmd_init(args) -> int:
     a _state/ git-ignore, and an optional git repo when git is available. Safe to
     re-run — never touches existing stream data."""
     created = not os.path.isdir(KB_ROOT)
-    for sub in ("stream", "tree", "tickets", "registers", "_state"):
+    for sub in ("stream", "tree", "tickets", "_state"):
         os.makedirs(os.path.join(KB_ROOT, sub), exist_ok=True)
     # Keep the growing/binary runtime artefacts out of the stream's git.
     gi = os.path.join(KB_ROOT, ".gitignore")
@@ -3212,7 +2911,7 @@ def cmd_init(args) -> int:
     print(f"brain instance {'created' if created else 'ready'} at {KB_ROOT}")
     print(f"  config: BRAIN_ROOT / {_config_path()} / default ./brain")
     if not _root_is_git_backed():
-        print("  NOTE: no git — the stream's safety net is the append-only spool "
+        print("  NOTE: no git — the stream's safety net is the append-only stream "
               "files plus your folder-sync history (e.g. OneDrive versions), not "
               "commits. Run `brain doctor` for the full picture.")
     return 0
@@ -3234,25 +2933,6 @@ def cmd_doctor(_args) -> int:
     if exists:
         scopes = _scopes()
         print(f"scopes    : {len(scopes)}")
-        # Shared (multi-writer) scopes: name the writer set of each and flag any
-        # spool whose write timestamps run backwards (a sync arrived out of order
-        # — harmless, the fold still merges deterministically, but worth seeing).
-        shared = [s for s in scopes if _is_shared(s)]
-        if shared:
-            print(f"shared    : {len(shared)} scope(s) on the multi-writer sync-folder layout")
-            for s in shared:
-                writers = _spool_writers(s)
-                frozen = len(_read_file_lines(_scope_path(s)))
-                print(f"  {s}: writers [{', '.join(writers) or 'none yet'}], "
-                      f"{frozen} frozen legacy entries")
-                for w in writers:
-                    tss = [(_parse(ln)[0] if _parse(ln) else "")
-                           for ln in _read_file_lines(_spool_path(s, w))]
-                    ooo = any(tss[i] and tss[i - 1] and tss[i] < tss[i - 1]
-                              for i in range(1, len(tss)))
-                    if ooo:
-                        print(f"    ! spool {w}.log has out-of-order write timestamps "
-                              "(sync lag — normal; the fold is still deterministic)")
     if _root_is_git_backed():
         print("git       : OK — every write commits; the stream is protected by git.")
         return 0
@@ -3261,7 +2941,7 @@ def cmd_doctor(_args) -> int:
     else:
         print("git       : ABSENT (the data root is not a git repo).")
     print("            DEGRADED PROFILE: the stream's safety net is the append-only")
-    print("            spool files themselves plus your folder-sync version history")
+    print("            stream files themselves plus your folder-sync version history")
     print("            (e.g. OneDrive). Writes still land; there are no commits to")
     print("            roll back to. This is expected on a locked-down machine.")
     return 0
@@ -3470,17 +3150,9 @@ def main() -> int:
 
     p = sub.add_parser("resolve", help="retire hazard #N (milestone + sup=N; index drops it)")
     p.add_argument("--project", "-p", help="scope slug (default: global)")
-    p.add_argument("entry", help="hazard entry id to resolve (a number, or a shared "
-                   "scope's <writer>:<seq> id)")
+    p.add_argument("entry", help="hazard entry number to resolve")
     p.add_argument("text", nargs="+", help="how it was fixed")
     p.set_defaults(fn=cmd_resolve)
-
-    p = sub.add_parser("share", help="convert a scope to the multi-writer "
-                       "(sync-folder) layout: freeze its log, route new notes to "
-                       "a per-writer spool")
-    p.add_argument("--scope", "--project", dest="scope",
-                   help="scope slug to share (default: global)")
-    p.set_defaults(fn=cmd_share)
 
     p = sub.add_parser("wake", help="pins + computed state + pull map + board")
     p.add_argument("--scope", help="scope slug (default: global)")
@@ -3499,8 +3171,7 @@ def main() -> int:
                    help="only hazards whose text/label whole-word-match this file "
                         "path (just-in-time edit gate); silent when none match")
     p.add_argument("--exclude",
-                   help="comma-separated entry ids to skip — numeric or "
-                        "writer:seq (session dedup for the gate)")
+                   help="comma-separated entry numbers to skip (session dedup for the gate)")
     p.set_defaults(fn=cmd_hazards)
 
     p = sub.add_parser("design", help="live invariants verbatim, grouped by subsystem")
@@ -3570,10 +3241,6 @@ def main() -> int:
                                     "supersession, labels, budgets)")
     p.add_argument("--scope", "--project", dest="scope")
     p.set_defaults(fn=cmd_lint)
-
-    p = sub.add_parser("sessions", help="entries grouped by capture session (sid)")
-    p.add_argument("--scope", "--project", dest="scope")
-    p.set_defaults(fn=cmd_sessions)
 
     p = sub.add_parser("init", help="create a fresh, empty instance at the data root")
     p.add_argument("--no-git", dest="no_git", action="store_true",

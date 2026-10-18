@@ -9,8 +9,8 @@ not just the ones that touch code:
 
   - The gate FIRES when the session either (a) wrote or edited ANY project file —
     code, docx, xlsx, md, anything OUTSIDE the instance's own data root and the
-    Claude Code config dir — OR (b) ran a mutating tickets/registers command (a
-    Bash/PowerShell tool call whose verb changes the board or a register).
+    Claude Code config dir — OR (b) ran a mutating tickets command (a
+    Bash/PowerShell tool call whose verb changes the board).
 
   - It does NOT fire on: read-only / Q&A sessions, sessions whose only writes
     landed inside the data root or its generated artifacts, or sessions that
@@ -20,11 +20,6 @@ not just the ones that touch code:
     `brain note` (or `brain resolve`) — inline capture, the normal path, or (b)
     wrote a file inside the data root (fixing a pin, a reference doc — also real
     persistence). A trivial change is still one line.
-
-This is the hook half of a two-layer model: the engine accrues capture debt on
-every MCP surface (see brain_mcp.py) and the hooks gate Claude Code — the SAME
-capture-or-attest contract on both. The hook is an accelerator, not the
-mechanism.
 
 After the first satisfied stop, a per-session sentinel
 (brain-ack-<session_id> in the cache dir) allows subsequent stops without
@@ -48,19 +43,13 @@ SHELL_TOOLS = {"Bash", "PowerShell", "bash", "powershell"}
 
 # Inline capture is the protocol. `brain resolve` also counts — retiring a
 # hazard is capture too. Matches `brain note`, `brain.py note`, or a full path
-# to brain.py followed by note/resolve. (`attest` is NOT a brain CLI subcommand
-# — it exists only as the MCP tool below, so it must never appear as a shell
-# verb the session is told to run.)
+# to brain.py followed by note/resolve.
 BRAIN_NOTE_RE = re.compile(r"brain(?:\.py)?[\"']?\s+(note|resolve)\b",
                            re.IGNORECASE)
-# The MCP server also exposes the capture verbs as tool_use blocks whose name
-# ends in brain_note / brain_resolve / brain_attest. brain_attest is the
-# sanctioned "nothing to capture" exit — a real MCP tool, unlike the CLI.
-CAPTURE_TOOL_SUFFIXES = ("brain_note", "brain_resolve", "brain_attest")
-# A session has substance if it ran a MUTATING board/register command. Verbs
+# A session has substance if it ran a MUTATING board command. Verbs
 # that change stored data (not the read-only board/show/view/log/export/init).
 BOARD_MUTATION_RE = re.compile(
-    r"\b(?:tickets|registers)(?:\.py)?[\"']?\s+"
+    r"\btickets(?:\.py)?[\"']?\s+"
     r"(?:open|claim|block|reopen|close|edit|update|comment|add|set|post|"
     r"correct|retire|restore)\b",
     re.IGNORECASE)
@@ -180,7 +169,7 @@ def _iter_shell_commands(transcript: list):
 
 
 def _ran_board_mutation(transcript: list) -> bool:
-    """True if any shell command ran a MUTATING tickets/registers verb."""
+    """True if any shell command ran a MUTATING tickets verb."""
     for cmd in _iter_shell_commands(transcript):
         if BOARD_MUTATION_RE.search(cmd):
             return True
@@ -188,21 +177,11 @@ def _ran_board_mutation(transcript: list) -> bool:
 
 
 def _check_brain_note(transcript: list) -> bool:
-    """True if the session captured or attested — a `brain note`/`resolve`/`attest`
-    run as a shell command, or the same verbs reached through the MCP server."""
+    """True if the session captured — a `brain note`/`resolve` run as a shell
+    command."""
     for cmd in _iter_shell_commands(transcript):
         if BRAIN_NOTE_RE.search(cmd):
             return True
-    for obj in transcript:
-        if not isinstance(obj, dict):
-            continue
-        for block in _get_assistant_content(obj):
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_use":
-                name = block.get("name") or ""
-                if name.endswith(CAPTURE_TOOL_SUFFIXES):
-                    return True
     return False
 
 
@@ -241,7 +220,7 @@ def main():
 
     # No substance this session -> nothing to enforce. Substance is either a
     # project-file write (code, docx, xlsx, md — anything outside the data root
-    # and the config dir) OR a mutating tickets/registers command.
+    # and the config dir) OR a mutating tickets command.
     if not (_wrote_project_file(transcript) or _ran_board_mutation(transcript)):
         sys.exit(0)
 
@@ -259,7 +238,7 @@ def main():
     # Substance this session but nothing was captured -> block and prompt.
     reason = (
         "This session did substantive work (edited a project file or changed the "
-        "ticket/register board). Capture what the diff can't tell: run "
+        "ticket board). Capture what the diff can't tell: run "
         f"`python \"{BRAIN_CLI}\" note --project <scope> --type "
         "<decision|milestone|gotcha|invariant|question|papercut> \"one line\"` "
         "for each memorable thing (scope = project slug; gotcha/invariant also "

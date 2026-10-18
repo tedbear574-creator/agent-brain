@@ -2,8 +2,8 @@
 
 The gate is keyed to session SUBSTANCE: it fires when the session wrote a
 project file (code, docx, xlsx, md — anything outside the instance data root)
-OR ran a mutating tickets/registers command, and it is satisfied by a
-`brain note`/`resolve`/`attest` (shell or MCP) or a write inside the data root.
+OR ran a mutating tickets command, and it is satisfied by a
+`brain note`/`resolve` or a write inside the data root.
 
 Each check drives the real hook as Claude Code does: a subprocess fed the Stop
 event JSON on stdin, with a JSONL transcript fixture on disk. A blocked stop
@@ -128,25 +128,6 @@ def test_board_mutation_satisfied_by_note(tmp_path):
                   "--source person:me"),
         _tool_use("Bash", command='python brain.py note --project demo '
                   '--type decision "closed the ticket, here is why"'),
-    ])
-    assert reason is None
-
-
-def test_mcp_brain_note_satisfies(tmp_path):
-    """The capture verb reached through the MCP server also satisfies."""
-    reason = _run_guard(tmp_path, [
-        _tool_use("Write", file_path="/home/u/engagement/report.docx"),
-        _tool_use("mcp__agent-brain__brain_note", project="demo", type="milestone",
-                  text="delivered"),
-    ])
-    assert reason is None
-
-
-def test_mcp_brain_attest_satisfies(tmp_path):
-    reason = _run_guard(tmp_path, [
-        _tool_use("Bash", command="python tickets.py update --root /b --ticket 3 "
-                  '-- "moved to review"'),
-        _tool_use("mcp__agent-brain__brain_attest", reason="pure housekeeping"),
     ])
     assert reason is None
 
