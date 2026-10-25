@@ -1236,3 +1236,44 @@ def test_serve_edit_can_set_owner_and_prefix(tmp_path, monkeypatch):
     keys = {x["key"] for x in body2["board"]["active"]}
     # OTHER numbers from 1 in its own space, independent of SIDE.
     assert keys == {"SIDE-1", "OTHER-1"}
+
+
+# --------------------------------------------------------------------------- #
+# Maps and waits                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_waiting_ticket_is_ready_once_what_it_waits_on_closes(
+        tmp_path, monkeypatch, capsys):
+    root = make_board(tmp_path, monkeypatch)
+    run("open", "Gear rework", "--kind", "map", "--root", root)
+    run("open", "Which metals?", "--kind", "grilling", "--map", "1",
+        "--root", root)
+    run("open", "Armour parts", "--map", "1", "--after", "2", "--root", root)
+    capsys.readouterr()
+    run("ready", "--map", "1", "--root", root)
+    out = capsys.readouterr().out
+    assert "Which metals?" in out and "Armour parts" not in out
+    run("close", "-t", "2", "--source", "decisions/gear.md", "--root", root)
+    capsys.readouterr()
+    run("ready", "--root", root)
+    out = capsys.readouterr().out
+    assert "Armour parts" in out and "Gear rework" not in out  # maps never ready
+    run("map", "-t", "1", "--root", root)
+    out = capsys.readouterr().out
+    assert "Decided:" in out and "decisions/gear.md" in out
+
+
+def test_wait_loops_and_non_map_parents_are_refused(tmp_path, monkeypatch):
+    root = make_board(tmp_path, monkeypatch)
+    run("open", "A", "--root", root)
+    run("open", "B", "--after", "1", "--root", root)
+    with pytest.raises(SystemExit):
+        run("edit", "-t", "1", "--after", "2", "--root", root)
+    with pytest.raises(SystemExit):
+        run("edit", "-t", "1", "--after", "1", "--root", root)
+    with pytest.raises(SystemExit):
+        run("open", "C", "--map", "1", "--root", root)  # 1 is not a map
+    assert tickets.board_state(root)
+    a = next(t for t in tickets.board_state(root).values() if t["title"] == "A")
+    assert a["after"] == []

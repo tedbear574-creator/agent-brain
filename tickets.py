@@ -161,6 +161,13 @@ STATUS_CLAIMED = "claimed"
 STATUS_BLOCKED = "blocked"
 STATUS_CLOSED = "closed"
 
+# What kind of ticket it is. Plain work has no kind. A "map" charts one big
+# effort (its notes hold the destination and the fog); the rest are the
+# decision tickets on a map: research (an agent looks it up), grilling (talked
+# through with the person who decides), prototype (a rough thing to react to),
+# task (work that must happen before a decision can be made).
+KINDS = ("map", "research", "grilling", "prototype", "task")
+
 
 def _norm_prefix(s) -> str:
     """A ticket's short code, tidied for display: trimmed, uppercased."""
@@ -281,6 +288,9 @@ def fold(events: list[dict], warnings: list | None = None,
                 "owner": ev.get("owner") or "",
                 "due": ev.get("due") or "",
                 "notes": ev.get("notes") or "",
+                "kind": ev.get("kind") or "",
+                "map": ev.get("map") or "",       # the map ticket's id
+                "after": list(ev.get("after") or []),  # ids it waits on
                 "blocked_reason": "",
                 "update": None,        # latest status line: {ts, writer, text}
                 "base": "active",      # active | blocked | closed
@@ -311,10 +321,13 @@ def fold(events: list[dict], warnings: list | None = None,
             t["close_note"] = ev.get("note") or ""
         elif verb == "edit":
             before_slot = (_eff_prefix(t, board_prefix), t["n"])
-            for field in ("title", "owner", "due", "notes", "prefix"):
+            for field in ("title", "owner", "due", "notes", "prefix",
+                          "kind", "map"):
                 if field in ev and ev[field] is not None:
                     t[field] = (_norm_prefix(ev[field]) if field == "prefix"
                                 else ev[field])
+            if ev.get("after") is not None:
+                t["after"] = list(ev["after"])
             # An edit that lands the ticket in a different (prefix, number)
             # slot goes through the same accounting an open does. The number
             # it aims for is the write-time ``propose_n`` when one was carried
@@ -442,6 +455,71 @@ def key_of(prefix: str, t: dict) -> str:
     permanent hex id underneath never changes and is the reference that always
     works."""
     return f"{t.get('prefix') or prefix}-{t['n']}{t['nsfx']}"
+
+
+# --------------------------------------------------------------------------- #
+# Maps and waits                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def waits_on(t: dict, tickets: dict) -> list[dict]:
+    """The tickets this one still waits on: those in its `after` not closed."""
+    return [tickets[i] for i in t.get("after", [])
+            if i in tickets and tickets[i]["status"] != STATUS_CLOSED]
+
+
+def is_ready(t: dict, tickets: dict) -> bool:
+    """Takeable now: active (not blocked, not closed), not a map, and every
+    ticket it waits on closed."""
+    return (t["status"] in (STATUS_OPEN, STATUS_CLAIMED)
+            and t.get("kind") != "map" and not waits_on(t, tickets))
+
+
+def _check_kind(kind: str) -> str:
+    kind = (kind or "").strip().lower()
+    if kind and kind not in KINDS:
+        _die(f"\"{kind}\" is not a ticket kind. Use one of: "
+             f"{', '.join(KINDS)} (or nothing for plain work).")
+    return kind
+
+
+def _map_id(tickets: dict, prefix: str, token: str, self_id: str = "") -> str:
+    token = (token or "").strip()
+    if not token:
+        return ""
+    m = resolve_ticket(tickets, prefix, token)
+    if m.get("kind") != "map":
+        _die(f"{key_of(prefix, m)} is not a map. Make it one first "
+             f"(edit -t {key_of(prefix, m)} --kind map).")
+    if m["id"] == self_id:
+        _die("A map can't sit on itself.")
+    return m["id"]
+
+
+def _after_ids(tickets: dict, prefix: str, tokens: str,
+               self_id: str = "") -> list[str]:
+    """Comma-separated ticket references -> ids. Refuses a ticket waiting on
+    itself or a loop of waits (it could never become ready)."""
+    ids: list[str] = []
+    for tok in (tokens or "").split(","):
+        if tok.strip():
+            i = resolve_ticket(tickets, prefix, tok)["id"]
+            if i not in ids:
+                ids.append(i)
+    if self_id:
+        if self_id in ids:
+            _die("A ticket can't wait on itself.")
+        seen, stack = set(), list(ids)
+        while stack:
+            i = stack.pop()
+            if i == self_id:
+                _die("That would make a loop of waits: one of those tickets "
+                     "already waits on this one.")
+            if i in seen or i not in tickets:
+                continue
+            seen.add(i)
+            stack.extend(tickets[i].get("after", []))
+    return ids
 
 
 # --------------------------------------------------------------------------- #
@@ -575,7 +653,8 @@ def cmd_open(args) -> int:
     """Add a new ticket."""
     root = resolve_root(args)
     t = act_open(root, title=args.title, owner=args.owner,
-                 due=args.due, notes=args.notes, prefix=args.prefix)
+                 due=args.due, notes=args.notes, prefix=args.prefix,
+                 kind=args.kind, map=args.map, after=args.after)
     cfg = load_config(root)
     print(f"Opened {key_of(cfg['prefix'], t)}  ({t['title']})")
     print(f"  id {t['id']}")
@@ -604,8 +683,11 @@ def _new_id(tickets: dict) -> str:
 
 def act_open(root: str, *, title: str, owner: str | None = None,
              due: str | None = None, notes: str | None = None,
-             prefix: str | None = None, writer: str | None = None) -> dict:
-    """Add a new ticket. Returns the freshly-folded ticket."""
+             prefix: str | None = None, kind: str | None = None,
+             map: str | None = None, after: str | None = None,
+             writer: str | None = None) -> dict:
+    """Add a new ticket. Returns the freshly-folded ticket. `map` and `after`
+    take ticket references (a number, a key, an id; `after` comma-separated)."""
     writer = writer or writer_id()
     title = (title or "").strip()
     if not title:
@@ -631,6 +713,12 @@ def act_open(root: str, *, title: str, owner: str | None = None,
         event["notes"] = notes.strip()
     if prefix and prefix.strip():
         event["prefix"] = _norm_prefix(prefix)
+    if _check_kind(kind or ""):
+        event["kind"] = _check_kind(kind or "")
+    if map and map.strip():
+        event["map"] = _map_id(tickets, board_prefix, map)
+    if after and after.strip():
+        event["after"] = _after_ids(tickets, board_prefix, after)
     append_event(root, event)
     # Re-fold so the number we report is the one the board will actually show.
     return fold(sorted_events(root), board_prefix=board_prefix)[tid]
@@ -704,18 +792,30 @@ def act_close(root: str, ticket_token: str, *, source: str,
 def act_edit(root: str, ticket_token: str, *, fields: dict,
              writer: str | None = None) -> dict:
     clean = {}
-    for f in ("title", "owner", "due", "notes", "prefix"):
+    for f in ("title", "owner", "due", "notes", "prefix", "kind", "map",
+              "after"):
         if f in fields and fields[f] is not None:
             clean[f] = str(fields[f]).strip()
+    if "kind" in clean:
+        clean["kind"] = _check_kind(clean["kind"])
     if "title" in clean and not clean["title"]:
         raise TicketError("A ticket needs a title — it can be changed, "
                           "but not blanked.")
     if not clean:
         raise TicketError("Nothing to change. Give at least one of title, "
-                          "owner, due, or notes.")
+                          "owner, due, notes, kind, map, or after.")
 
     def build(ev, t, w, cfg, tickets):
         ev.update(clean)
+        if "map" in clean:
+            ev["map"] = _map_id(tickets, cfg["prefix"], clean["map"], t["id"])
+        if "after" in clean:
+            ev["after"] = _after_ids(tickets, cfg["prefix"], clean["after"],
+                                     t["id"])
+        if clean.get("kind", "map") != "map" and any(
+                o.get("map") == t["id"] for o in tickets.values()):
+            _die(f"{key_of(cfg['prefix'], t)} is a map with tickets on it; "
+                 f"move them off first.")
         # Moving a ticket to another short code: it keeps its number when that
         # number is free in the target space, otherwise the event carries the
         # next free number there and the fold renumbers it. Either way the id
@@ -797,7 +897,8 @@ def cmd_edit(args) -> int:
     """Change a ticket's title, owner, due date, or notes."""
     root = resolve_root(args)
     fields = {}
-    for f in ("title", "owner", "due", "notes", "prefix"):
+    for f in ("title", "owner", "due", "notes", "prefix", "kind", "map",
+              "after"):
         v = getattr(args, f)
         if v is not None:
             fields[f] = v
@@ -839,6 +940,17 @@ def cmd_show(args) -> int:
     if t["update"]:
         u = t["update"]
         print(f"  latest : {u['text']}  ({u['writer']}, {u['ts'][:10]})")
+    if t["kind"]:
+        print(f"  kind   : {t['kind']}")
+    if t["map"] and t["map"] in tickets:
+        m = tickets[t["map"]]
+        print(f"  map    : {key_of(cfg['prefix'], m)}  {m['title']}")
+    if t["after"]:
+        waits = ", ".join(
+            f"{key_of(cfg['prefix'], tickets[i])}"
+            f"{'' if tickets[i]['status'] != STATUS_CLOSED else ' (done)'}"
+            for i in t["after"] if i in tickets)
+        print(f"  after  : {waits}")
     if t["notes"]:
         print(f"  notes  : {t['notes']}")
     if t["status"] == STATUS_CLOSED and t["source"]:
@@ -907,7 +1019,8 @@ def cmd_board(args) -> int:
             t["title"],
             t["owner"] or "-",
             due,
-            _short_status(t),
+            ("waiting" if t["status"] in (STATUS_OPEN, STATUS_CLAIMED)
+             and waits_on(t, tickets) else _short_status(t)),
             latest,
         ])
     headers = ["key", "title", "owner", "due", "status", "latest update"]
@@ -916,6 +1029,84 @@ def cmd_board(args) -> int:
     if overdue:
         print(f"\n! = past its deadline ({overdue} "
               f"{'ticket' if overdue == 1 else 'tickets'})")
+    return 0
+
+
+def cmd_ready(args) -> int:
+    """List the tickets takeable now: active, not waiting on an open ticket."""
+    root = resolve_root(args)
+    cfg = load_config(root)
+    tickets = board_state(root)
+    map_id = (resolve_ticket(tickets, cfg["prefix"], args.map)["id"]
+              if args.map else "")
+    pfx = _norm_prefix(args.prefix) if args.prefix else ""
+    rows = [t for t in _sorted_for_board(tickets, False)
+            if is_ready(t, tickets)
+            and (not map_id or t["map"] == map_id)
+            and (not pfx or _eff_prefix(t, cfg["prefix"]) == pfx)
+            and (not args.free or not t["owner"])]
+    if not rows:
+        print("(nothing ready)")
+        return 0
+    print(_render_table(["key", "title", "kind", "owner"], [
+        [key_of(cfg["prefix"], t), t["title"], t["kind"] or "-",
+         t["owner"] or "-"] for t in rows]))
+    return 0
+
+
+def cmd_map(args) -> int:
+    """No ticket: list the maps. A map: its notes, then its tickets by where
+    they stand (decided, ready, waiting, blocked)."""
+    root = resolve_root(args)
+    cfg = load_config(root)
+    pfx = cfg["prefix"]
+    tickets = board_state(root)
+    if not args.ticket:
+        maps = [t for t in _sorted_for_board(tickets, args.all)
+                if t["kind"] == "map"]
+        if not maps:
+            print("(no maps)")
+            return 0
+        rows = []
+        for m in maps:
+            kids = [t for t in tickets.values() if t["map"] == m["id"]]
+            done = sum(1 for t in kids if t["status"] == STATUS_CLOSED)
+            ready = sum(1 for t in kids if is_ready(t, tickets))
+            rows.append([key_of(pfx, m), m["title"], f"{done}/{len(kids)}",
+                         str(ready), _short_status(m)])
+        print(_render_table(["key", "map", "decided", "ready", "status"],
+                            rows))
+        return 0
+    m = resolve_ticket(tickets, pfx, args.ticket)
+    if m["kind"] != "map":
+        _die(f"{key_of(pfx, m)} is not a map.")
+    print(f"{key_of(pfx, m)}  —  {m['title']}  ({_short_status(m)})")
+    if m["notes"]:
+        print()
+        print(m["notes"])
+    kids = sorted((t for t in tickets.values() if t["map"] == m["id"]),
+                  key=lambda t: (_eff_prefix(t, pfx), t["n"], t["nsfx"]))
+
+    def line(t, extra=""):
+        kind = f" [{t['kind']}]" if t["kind"] else ""
+        owner = f" ({t['owner']})" if t["owner"] else ""
+        return f"  {key_of(pfx, t)}{kind} {t['title']}{owner}{extra}"
+
+    groups = [
+        ("Decided", [line(t, f" — {t['source']}") for t in kids
+                     if t["status"] == STATUS_CLOSED]),
+        ("Ready", [line(t) for t in kids if is_ready(t, tickets)]),
+        ("Waiting", [line(t, " — after " + ", ".join(
+            key_of(pfx, w) for w in waits_on(t, tickets)))
+            for t in kids if t["status"] in (STATUS_OPEN, STATUS_CLAIMED)
+            and waits_on(t, tickets)]),
+        ("Blocked", [line(t, f" — {t['blocked_reason']}") for t in kids
+                     if t["status"] == STATUS_BLOCKED]),
+    ]
+    for name, lines in groups:
+        if lines:
+            print(f"\n{name}:")
+            print("\n".join(lines))
     return 0
 
 
@@ -1170,7 +1361,8 @@ def _describe_event(ev: dict) -> str:
         note = f" — {ev['note']}" if ev.get("note") else ""
         return f"{ts}  {who} closed it (proof: {ev.get('source','')}){note}"
     if verb == "edit":
-        changed = ", ".join(k for k in ("title", "owner", "due", "notes")
+        changed = ", ".join(k for k in ("title", "owner", "due", "notes",
+                                         "prefix", "kind", "map", "after")
                             if k in ev)
         return f"{ts}  {who} changed {changed or 'the ticket'}"
     if verb == "update":
@@ -1214,6 +1406,10 @@ def _board_payload(root: str) -> dict:
             "blocked_reason": t["blocked_reason"],
             "update": t["update"],
             "notes": t["notes"],
+            "kind": t["kind"],
+            "map": t["map"],
+            "after": t["after"],
+            "waiting": [x["id"] for x in waits_on(t, tickets)],
             "source": t["source"],
             "close_note": t["close_note"],
             "comments": t["comments"],
@@ -1944,6 +2140,16 @@ def _add_root(p) -> None:
     p.add_argument("--root", help="the board's folder (or set TICKETS_ROOT)")
 
 
+def _add_map_args(p) -> None:
+    p.add_argument("--kind", help="map, research, grilling, prototype or "
+                                  "task (empty for plain work)")
+    p.add_argument("--map", help="the map this ticket sits on (empty to "
+                                 "take it off)")
+    p.add_argument("--after", help="tickets this one waits on, comma-"
+                                   "separated; replaces the list (empty "
+                                   "clears it)")
+
+
 def _add_ticket(p) -> None:
     p.add_argument("--ticket", "-t", required=True,
                    help="which ticket: a number (3), a key (PREFIX-3), or its id")
@@ -1974,6 +2180,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="file this ticket under a different short code than "
                         "the board's — the project or engagement it really "
                         "belongs to (numbered in that code's own space, from 1)")
+    _add_map_args(p)
     p.set_defaults(fn=cmd_open)
 
     p = sub.add_parser("claim", help="take a ticket (or assign it with --owner)")
@@ -2017,6 +2224,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "else takes the next free one (the new key is printed). "
                         "An empty value (--prefix \"\") goes back to the "
                         "board's own code")
+    _add_map_args(p)
     p.set_defaults(fn=cmd_edit)
 
     p = sub.add_parser("update",
@@ -2041,6 +2249,22 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root(p)
     p.add_argument("--all", action="store_true", help="include done tickets")
     p.set_defaults(fn=cmd_board)
+
+    p = sub.add_parser("ready", help="list the tickets takeable now (not "
+                                     "blocked, not waiting on an open ticket)")
+    _add_root(p)
+    p.add_argument("--map", help="only this map's tickets")
+    p.add_argument("--prefix", help="only this short code's tickets")
+    p.add_argument("--free", action="store_true",
+                   help="only tickets nobody has taken")
+    p.set_defaults(fn=cmd_ready)
+
+    p = sub.add_parser("map", help="list the maps, or show one map: its "
+                                   "notes and its tickets by where they stand")
+    _add_root(p)
+    p.add_argument("--ticket", "-t", help="the map (a number, key or id)")
+    p.add_argument("--all", action="store_true", help="include done maps")
+    p.set_defaults(fn=cmd_map)
 
     p = sub.add_parser("view", help="open the up-to-date board in a browser")
     _add_root(p)

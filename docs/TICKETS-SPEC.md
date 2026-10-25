@@ -65,13 +65,28 @@ One JSON object per line: `{"ts": ISO-8601 seconds, "writer": str,
 writers minting offline must not collide; if a collision ever happens anyway
 the fold warns loudly and keeps the first — silent loss is never allowed).
 
-Verbs: `open` (title, propose_n, optional owner/due/notes/prefix), `claim`
+Verbs: `open` (title, propose_n, optional owner/due/notes/prefix/kind/map/after), `claim`
 (owner ← writer unless `--owner`), `block` (reason), `reopen`, `close`
 (source REQUIRED, optional note), `edit` (any of
-title/owner/due/notes/prefix), `update` (text — the ticket's one-line
+title/owner/due/notes/prefix/kind/map/after; `after` replaces the whole list), `update` (text — the ticket's one-line
 "where this stands"; only the latest shows on board/page/csv, every earlier
 one stays recoverable in the log because updates are appended events like
 everything else), `comment` (text).
+
+## Maps and waits
+
+For efforts too big for one session (the `wayfinder` skill). `kind` is empty
+(plain work) or one of `map`, `research`, `grilling`, `prototype`, `task`. A
+`map` ticket charts one effort: its notes hold the destination, the fog (not
+yet specified) and what is out of scope. `map` on another ticket is the map's
+permanent id (the map must have kind `map`; a map with tickets on it can't
+change kind). `after` is a list of permanent ids the ticket waits on; a
+ticket can't wait on itself and a loop of waits is refused at write time.
+Ids, never keys, are stored, so a prefix move never breaks a link.
+
+Derived, never stored: a ticket **waits** while any `after` ticket is not
+closed; it is **ready** when active (open or claimed, not blocked), not a map,
+and waiting on nothing.
 
 ## Fold (deterministic — the board is computed, never stored)
 
@@ -94,10 +109,14 @@ clobbering notes), `reopen` clears it. Later `edit` wins per field.
 
 ## CLI
 
-`open, claim, close, block, reopen, edit, update, comment, show, board, view,
-serve, page, export, log, init`. Every ticket argument accepts bare `n`,
+`open, claim, close, block, reopen, edit, update, comment, show, board, ready,
+map, view, serve, page, export, log, init`. Every ticket argument accepts bare `n`,
 `PREFIX-n`, or the hash. `board`: terminal table (key, title, owner, due,
 status), sorted due-first with overdue flagged, closed hidden unless `--all`.
+`board` shows a waiting ticket's status as `waiting`. `ready [--map M]
+[--prefix P] [--free]`: the ready tickets. `map`: every map with decided/total
+and ready counts; `map -t M`: the map's notes, then its tickets under Decided
+(with each close source), Ready, Waiting (on which) and Blocked (why).
 `view`: open the up-to-date board in a browser. `page`: fully regenerate
 `board.md` + `board.html` (self-contained inline CSS, no external assets,
 readable on any machine). `export`: `board.csv`, Excel-friendly (UTF-8 BOM;
