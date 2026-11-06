@@ -17,7 +17,7 @@ Two stdlib-only pieces:
   ```
 
   Read by ccdesk (`tickets_board.py`, the web board), life-ops (`heartbeat.py`, the daily push),
-  bluestone and wholesale-ops (operator runs).
+  bluestone (operator runs).
 
 - **`hooks/session_start.py`** — the SessionStart hook: Tod's profile (`global-kb/user.md`), the
   tickets due today or overdue, and pending phone replies (`global-kb/inbox.md`). Silent inside
