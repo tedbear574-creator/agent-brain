@@ -1277,3 +1277,21 @@ def test_wait_loops_and_non_map_parents_are_refused(tmp_path, monkeypatch):
     assert tickets.board_state(root)
     a = next(t for t in tickets.board_state(root).values() if t["title"] == "A")
     assert a["after"] == []
+
+
+def test_priority_set_changed_cleared_and_checked(tmp_path, monkeypatch):
+    as_writer(monkeypatch, "tod")
+    root = str(tmp_path / "b")
+    run("init", "--root", root, "--prefix", "T", "--name", "T")
+    run("open", "--root", root, "--priority", "must", "a")
+
+    def only(r):
+        return next(iter(tickets.board_state(r).values()))
+
+    assert only(root)["priority"] == "must"
+    run("edit", "--root", root, "--ticket", "1", "--priority", "later")
+    assert only(root)["priority"] == "later"
+    run("edit", "--root", root, "--ticket", "1", "--priority", "")
+    assert only(root)["priority"] == ""
+    with pytest.raises(SystemExit):
+        run("edit", "--root", root, "--ticket", "1", "--priority", "urgent")

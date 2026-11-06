@@ -65,10 +65,10 @@ One JSON object per line: `{"ts": ISO-8601 seconds, "writer": str,
 writers minting offline must not collide; if a collision ever happens anyway
 the fold warns loudly and keeps the first — silent loss is never allowed).
 
-Verbs: `open` (title, propose_n, optional owner/due/notes/prefix/kind/map/after), `claim`
+Verbs: `open` (title, propose_n, optional owner/due/notes/prefix/kind/map/after/priority), `claim`
 (owner ← writer unless `--owner`), `block` (reason), `reopen`, `close`
 (source REQUIRED, optional note), `edit` (any of
-title/owner/due/notes/prefix/kind/map/after; `after` replaces the whole list), `update` (text — the ticket's one-line
+title/owner/due/notes/prefix/kind/map/after/priority; `after` replaces the whole list), `update` (text — the ticket's one-line
 "where this stands"; only the latest shows on board/page/csv, every earlier
 one stays recoverable in the log because updates are appended events like
 everything else), `comment` (text).
@@ -141,3 +141,7 @@ same board); propose_n collision race renumbers only the loser; close without
 source rejected with the attestation hint; writer derivation + env override;
 id resolution (n / PREFIX-n / hash); page + csv generation; reopen/edit
 semantics. Gate: `python -m pytest tests/test_tickets.py -q`.
+
+## Priority
+
+`priority` says how much a ticket matters if it sits: `must` (something real stops or breaks if it is ignored), `later` (worth doing, nothing depends on it), or empty (not sorted yet; readers treat it as `must`, so nothing is hidden by accident). An edit with an empty value clears it.
