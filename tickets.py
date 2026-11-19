@@ -167,6 +167,13 @@ STATUS_CLOSED = "closed"
 # through with the person who decides), prototype (a rough thing to react to),
 # task (work that must happen before a decision can be made).
 KINDS = ("map", "research", "grilling", "prototype", "task")
+# Where a piece of work stands on its way to shipped, in order. A ticket may
+# enter at any stage and skip stages; `pick` and `play` are the two where the
+# work waits on the person the board belongs to, not on a session.
+STAGES = ("design", "prototype", "pick", "build", "check", "play")
+HUMAN_STAGES = ("pick", "play")
+# A title is a name, read in lists; everything else goes in the notes.
+TITLE_MAX = 70
 
 
 def _norm_prefix(s) -> str:
@@ -290,6 +297,7 @@ def fold(events: list[dict], warnings: list | None = None,
                 "notes": ev.get("notes") or "",
                 "kind": ev.get("kind") or "",
                 "priority": ev.get("priority") or "",  # must | later | unset
+                "stage": ev.get("stage") or "",   # one of STAGES | unset
                 "map": ev.get("map") or "",       # the map ticket's id
                 "after": list(ev.get("after") or []),  # ids it waits on
                 "blocked_reason": "",
@@ -323,7 +331,7 @@ def fold(events: list[dict], warnings: list | None = None,
         elif verb == "edit":
             before_slot = (_eff_prefix(t, board_prefix), t["n"])
             for field in ("title", "owner", "due", "notes", "prefix",
-                          "kind", "map", "priority"):
+                          "kind", "map", "priority", "stage"):
                 if field in ev and ev[field] is not None:
                     t[field] = (_norm_prefix(ev[field]) if field == "prefix"
                                 else ev[field])
@@ -482,6 +490,24 @@ def _check_kind(kind: str) -> str:
         _die(f"\"{kind}\" is not a ticket kind. Use one of: "
              f"{', '.join(KINDS)} (or nothing for plain work).")
     return kind
+
+
+def _check_stage(stage: str) -> str:
+    stage = (stage or "").strip().lower()
+    if stage and stage not in STAGES:
+        raise TicketError(f"\"{stage}\" is not a stage. Use one of: "
+                          f"{', '.join(STAGES)} (or nothing to clear it).")
+    return stage
+
+
+def _check_title(title: str) -> str:
+    title = " ".join((title or "").split())
+    if len(title) > TITLE_MAX:
+        raise TicketError(
+            f"That title is {len(title)} characters; the limit is "
+            f"{TITLE_MAX}. A title is a short name for the ticket (what it "
+            f"is, in a few plain words). Put the rest in --notes.")
+    return title
 
 
 def _check_priority(priority: str) -> str:
@@ -664,7 +690,7 @@ def cmd_open(args) -> int:
     t = act_open(root, title=args.title, owner=args.owner,
                  due=args.due, notes=args.notes, prefix=args.prefix,
                  kind=args.kind, map=args.map, after=args.after,
-                 priority=args.priority)
+                 priority=args.priority, stage=args.stage)
     cfg = load_config(root)
     print(f"Opened {key_of(cfg['prefix'], t)}  ({t['title']})")
     print(f"  id {t['id']}")
@@ -695,12 +721,12 @@ def act_open(root: str, *, title: str, owner: str | None = None,
              due: str | None = None, notes: str | None = None,
              prefix: str | None = None, kind: str | None = None,
              map: str | None = None, after: str | None = None,
-             priority: str | None = None,
+             priority: str | None = None, stage: str | None = None,
              writer: str | None = None) -> dict:
     """Add a new ticket. Returns the freshly-folded ticket. `map` and `after`
     take ticket references (a number, a key, an id; `after` comma-separated)."""
     writer = writer or writer_id()
-    title = (title or "").strip()
+    title = _check_title(title)
     if not title:
         raise TicketError("A new ticket needs a title — a short line saying "
                           "what it is about.")
@@ -732,6 +758,8 @@ def act_open(root: str, *, title: str, owner: str | None = None,
         event["after"] = _after_ids(tickets, board_prefix, after)
     if _check_priority(priority or ""):
         event["priority"] = _check_priority(priority or "")
+    if _check_stage(stage or ""):
+        event["stage"] = _check_stage(stage or "")
     append_event(root, event)
     # Re-fold so the number we report is the one the board will actually show.
     return fold(sorted_events(root), board_prefix=board_prefix)[tid]
@@ -806,19 +834,24 @@ def act_edit(root: str, ticket_token: str, *, fields: dict,
              writer: str | None = None) -> dict:
     clean = {}
     for f in ("title", "owner", "due", "notes", "prefix", "kind", "map",
-              "after", "priority"):
+              "after", "priority", "stage"):
         if f in fields and fields[f] is not None:
             clean[f] = str(fields[f]).strip()
     if "kind" in clean:
         clean["kind"] = _check_kind(clean["kind"])
     if "priority" in clean:
         clean["priority"] = _check_priority(clean["priority"])
+    if "stage" in clean:
+        clean["stage"] = _check_stage(clean["stage"])
+    if "title" in clean:
+        clean["title"] = _check_title(clean["title"])
     if "title" in clean and not clean["title"]:
         raise TicketError("A ticket needs a title — it can be changed, "
                           "but not blanked.")
     if not clean:
         raise TicketError("Nothing to change. Give at least one of title, "
-                          "owner, due, notes, kind, map, after, or priority.")
+                          "owner, due, notes, kind, map, after, priority, or "
+                          "stage.")
 
     def build(ev, t, w, cfg, tickets):
         ev.update(clean)
@@ -913,7 +946,7 @@ def cmd_edit(args) -> int:
     root = resolve_root(args)
     fields = {}
     for f in ("title", "owner", "due", "notes", "prefix", "kind", "map",
-              "after", "priority"):
+              "after", "priority", "stage"):
         v = getattr(args, f)
         if v is not None:
             fields[f] = v
@@ -959,6 +992,8 @@ def cmd_show(args) -> int:
         print(f"  kind   : {t['kind']}")
     if t["priority"]:
         print(f"  priority: {t['priority']}")
+    if t["stage"]:
+        print(f"  stage  : {t['stage']}")
     if t["map"] and t["map"] in tickets:
         m = tickets[t["map"]]
         print(f"  map    : {key_of(cfg['prefix'], m)}  {m['title']}")
@@ -1105,7 +1140,8 @@ def cmd_map(args) -> int:
                   key=lambda t: (_eff_prefix(t, pfx), t["n"], t["nsfx"]))
 
     def line(t, extra=""):
-        kind = f" [{t['kind']}]" if t["kind"] else ""
+        tag = t["stage"] or t["kind"]
+        kind = f" [{tag}]" if tag else ""
         owner = f" ({t['owner']})" if t["owner"] else ""
         return f"  {key_of(pfx, t)}{kind} {t['title']}{owner}{extra}"
 
@@ -1425,6 +1461,7 @@ def _board_payload(root: str) -> dict:
             "notes": t["notes"],
             "kind": t["kind"],
             "priority": t["priority"],
+            "stage": t["stage"],
             "map": t["map"],
             "after": t["after"],
             "waiting": [x["id"] for x in waits_on(t, tickets)],
@@ -2166,6 +2203,10 @@ def _add_map_args(p) -> None:
     p.add_argument("--after", help="tickets this one waits on, comma-"
                                    "separated; replaces the list (empty "
                                    "clears it)")
+    p.add_argument("--stage", help="where the work stands: design, "
+                                   "prototype, pick, build, check or play "
+                                   "(pick and play wait on the board's "
+                                   "owner; empty clears it)")
     p.add_argument("--priority", help="must (something real stops or breaks "
                                       "if it is ignored) or later (worth "
                                       "doing, nothing depends on it)")

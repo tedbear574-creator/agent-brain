@@ -65,10 +65,10 @@ One JSON object per line: `{"ts": ISO-8601 seconds, "writer": str,
 writers minting offline must not collide; if a collision ever happens anyway
 the fold warns loudly and keeps the first — silent loss is never allowed).
 
-Verbs: `open` (title, propose_n, optional owner/due/notes/prefix/kind/map/after/priority), `claim`
+Verbs: `open` (title, propose_n, optional owner/due/notes/prefix/kind/map/after/priority/stage), `claim`
 (owner ← writer unless `--owner`), `block` (reason), `reopen`, `close`
 (source REQUIRED, optional note), `edit` (any of
-title/owner/due/notes/prefix/kind/map/after/priority; `after` replaces the whole list), `update` (text — the ticket's one-line
+title/owner/due/notes/prefix/kind/map/after/priority/stage; `after` replaces the whole list), `update` (text — the ticket's one-line
 "where this stands"; only the latest shows on board/page/csv, every earlier
 one stays recoverable in the log because updates are appended events like
 everything else), `comment` (text).
@@ -145,3 +145,11 @@ semantics. Gate: `python -m pytest tests/test_tickets.py -q`.
 ## Priority
 
 `priority` says how much a ticket matters if it sits: `must` (something real stops or breaks if it is ignored), `later` (worth doing, nothing depends on it), or empty (not sorted yet; readers treat it as `must`, so nothing is hidden by accident). An edit with an empty value clears it.
+
+## Title and notes
+
+`title` is the ticket's name, read in lists: at most 70 characters (`TITLE_MAX`), refused at `open` and at an `edit` that sets it. Everything else about the ticket (what is wrong, where, the plan, the file to read) goes in `notes`. A ticket written before the limit keeps its long title until someone renames it; its other fields edit as usual.
+
+## Stage
+
+`stage` says where a piece of work stands on its way to shipped: `design`, `prototype`, `pick`, `build`, `check`, `play`, in that order, or empty (the ticket is not on the pipeline). A ticket may enter at any stage and skip stages (a bug starts at `build`); whoever finishes a stage moves it with `edit --stage`. `pick` (choose between options that were made) and `play` (try the built thing) are the two stages that wait on the board's owner, not on a session: a reader gathers every ticket at one of them into a single ask per project. `close` ends the pipeline; the stage a closed ticket last held stays on it. `map -t M` shows a ticket's stage in place of its kind.

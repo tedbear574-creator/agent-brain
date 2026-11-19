@@ -1295,3 +1295,40 @@ def test_priority_set_changed_cleared_and_checked(tmp_path, monkeypatch):
     assert only(root)["priority"] == ""
     with pytest.raises(SystemExit):
         run("edit", "--root", root, "--ticket", "1", "--priority", "urgent")
+
+
+def test_stage_set_moved_cleared_and_checked(tmp_path, monkeypatch):
+    as_writer(monkeypatch, "tod")
+    root = str(tmp_path / "b")
+    run("init", "--root", root, "--prefix", "T", "--name", "T")
+    run("open", "--root", root, "--stage", "design", "a")
+
+    def only(r):
+        return next(iter(tickets.board_state(r).values()))
+
+    assert only(root)["stage"] == "design"
+    run("edit", "--root", root, "--ticket", "1", "--stage", "pick")
+    assert only(root)["stage"] == "pick"
+    run("edit", "--root", root, "--ticket", "1", "--stage", "")
+    assert only(root)["stage"] == ""
+    with pytest.raises(SystemExit):
+        run("edit", "--root", root, "--ticket", "1", "--stage", "review")
+
+
+def test_a_long_title_is_refused_and_an_old_long_one_still_edits(
+        tmp_path, monkeypatch):
+    as_writer(monkeypatch, "tod")
+    root = str(tmp_path / "b")
+    run("init", "--root", root, "--prefix", "T", "--name", "T")
+    long = "x" * (tickets.TITLE_MAX + 1)
+    with pytest.raises(SystemExit):
+        run("open", "--root", root, long)
+    assert tickets.board_state(root) == {}
+    # A ticket written before the limit keeps working: its other fields edit.
+    tickets.append_event(root, {"ts": "2026-01-01T00:00:00", "writer": "tod",
+                                "verb": "open", "id": "aaaaaaaa",
+                                "title": long, "propose_n": 1})
+    run("edit", "--root", root, "--ticket", "1", "--owner", "tod")
+    assert tickets.board_state(root)["aaaaaaaa"]["owner"] == "tod"
+    with pytest.raises(SystemExit):
+        run("edit", "--root", root, "--ticket", "1", "--title", long)
