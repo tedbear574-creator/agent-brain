@@ -171,6 +171,9 @@ KINDS = ("map", "research", "grilling", "prototype", "task")
 # enter at any stage and skip stages; `pick` and `play` are the two where the
 # work waits on the person the board belongs to, not on a session.
 STAGES = ("design", "prototype", "pick", "build", "check", "play")
+# What a ticket's next run needs that only some machines have. `none` says it
+# was judged and needs none of them; empty means nobody has said yet.
+NEEDS = ("studio",)
 HUMAN_STAGES = ("pick", "play")
 # A title is a name, read in lists; everything else goes in the notes.
 TITLE_MAX = 70
@@ -298,6 +301,7 @@ def fold(events: list[dict], warnings: list | None = None,
                 "kind": ev.get("kind") or "",
                 "priority": ev.get("priority") or "",  # must | later | unset
                 "stage": ev.get("stage") or "",   # one of STAGES | unset
+                "needs": ev.get("needs") or "",   # NEEDS tokens comma-joined | none | unset
                 "map": ev.get("map") or "",       # the map ticket's id
                 "after": list(ev.get("after") or []),  # ids it waits on
                 "blocked_reason": "",
@@ -331,7 +335,7 @@ def fold(events: list[dict], warnings: list | None = None,
         elif verb == "edit":
             before_slot = (_eff_prefix(t, board_prefix), t["n"])
             for field in ("title", "owner", "due", "notes", "prefix",
-                          "kind", "map", "priority", "stage"):
+                          "kind", "map", "priority", "stage", "needs"):
                 if field in ev and ev[field] is not None:
                     t[field] = (_norm_prefix(ev[field]) if field == "prefix"
                                 else ev[field])
@@ -508,6 +512,17 @@ def _check_title(title: str) -> str:
             f"{TITLE_MAX}. A title is a short name for the ticket (what it "
             f"is, in a few plain words). Put the rest in --notes.")
     return title
+
+
+def _check_needs(needs: str) -> str:
+    tokens = [x.strip().lower() for x in (needs or "").split(",") if x.strip()]
+    if tokens == ["none"]:
+        return "none"
+    bad = [x for x in tokens if x not in NEEDS]
+    if bad:
+        _die(f"\"{bad[0]}\" is not a need. Use {', '.join(NEEDS)} "
+             f"(comma-separated), none, or nothing to clear it.")
+    return ",".join(x for x in NEEDS if x in tokens)
 
 
 def _check_priority(priority: str) -> str:
@@ -690,7 +705,8 @@ def cmd_open(args) -> int:
     t = act_open(root, title=args.title, owner=args.owner,
                  due=args.due, notes=args.notes, prefix=args.prefix,
                  kind=args.kind, map=args.map, after=args.after,
-                 priority=args.priority, stage=args.stage)
+                 priority=args.priority, stage=args.stage,
+                 needs=args.needs)
     cfg = load_config(root)
     print(f"Opened {key_of(cfg['prefix'], t)}  ({t['title']})")
     print(f"  id {t['id']}")
@@ -722,6 +738,7 @@ def act_open(root: str, *, title: str, owner: str | None = None,
              prefix: str | None = None, kind: str | None = None,
              map: str | None = None, after: str | None = None,
              priority: str | None = None, stage: str | None = None,
+             needs: str | None = None,
              writer: str | None = None) -> dict:
     """Add a new ticket. Returns the freshly-folded ticket. `map` and `after`
     take ticket references (a number, a key, an id; `after` comma-separated)."""
@@ -760,6 +777,8 @@ def act_open(root: str, *, title: str, owner: str | None = None,
         event["priority"] = _check_priority(priority or "")
     if _check_stage(stage or ""):
         event["stage"] = _check_stage(stage or "")
+    if _check_needs(needs or ""):
+        event["needs"] = _check_needs(needs or "")
     append_event(root, event)
     # Re-fold so the number we report is the one the board will actually show.
     return fold(sorted_events(root), board_prefix=board_prefix)[tid]
@@ -834,7 +853,7 @@ def act_edit(root: str, ticket_token: str, *, fields: dict,
              writer: str | None = None) -> dict:
     clean = {}
     for f in ("title", "owner", "due", "notes", "prefix", "kind", "map",
-              "after", "priority", "stage"):
+              "after", "priority", "stage", "needs"):
         if f in fields and fields[f] is not None:
             clean[f] = str(fields[f]).strip()
     if "kind" in clean:
@@ -843,6 +862,8 @@ def act_edit(root: str, ticket_token: str, *, fields: dict,
         clean["priority"] = _check_priority(clean["priority"])
     if "stage" in clean:
         clean["stage"] = _check_stage(clean["stage"])
+    if "needs" in clean:
+        clean["needs"] = _check_needs(clean["needs"])
     if "title" in clean:
         clean["title"] = _check_title(clean["title"])
     if "title" in clean and not clean["title"]:
@@ -850,8 +871,8 @@ def act_edit(root: str, ticket_token: str, *, fields: dict,
                           "but not blanked.")
     if not clean:
         raise TicketError("Nothing to change. Give at least one of title, "
-                          "owner, due, notes, kind, map, after, priority, or "
-                          "stage.")
+                          "owner, due, notes, kind, map, after, priority, "
+                          "stage, or needs.")
 
     def build(ev, t, w, cfg, tickets):
         ev.update(clean)
@@ -946,7 +967,7 @@ def cmd_edit(args) -> int:
     root = resolve_root(args)
     fields = {}
     for f in ("title", "owner", "due", "notes", "prefix", "kind", "map",
-              "after", "priority", "stage"):
+              "after", "priority", "stage", "needs"):
         v = getattr(args, f)
         if v is not None:
             fields[f] = v
@@ -992,6 +1013,8 @@ def cmd_show(args) -> int:
         print(f"  kind   : {t['kind']}")
     if t["priority"]:
         print(f"  priority: {t['priority']}")
+    if t["needs"]:
+        print(f"  needs  : {t['needs']}")
     if t["stage"]:
         print(f"  stage  : {t['stage']}")
     if t["map"] and t["map"] in tickets:
@@ -1415,7 +1438,8 @@ def _describe_event(ev: dict) -> str:
         return f"{ts}  {who} closed it (proof: {ev.get('source','')}){note}"
     if verb == "edit":
         changed = ", ".join(k for k in ("title", "owner", "due", "notes",
-                                         "prefix", "kind", "map", "after", "priority")
+                                         "prefix", "kind", "map", "after", "priority",
+                                         "stage", "needs")
                             if k in ev)
         return f"{ts}  {who} changed {changed or 'the ticket'}"
     if verb == "update":
@@ -1461,6 +1485,7 @@ def _board_payload(root: str) -> dict:
             "notes": t["notes"],
             "kind": t["kind"],
             "priority": t["priority"],
+            "needs": t["needs"],
             "stage": t["stage"],
             "map": t["map"],
             "after": t["after"],
@@ -2210,6 +2235,9 @@ def _add_map_args(p) -> None:
     p.add_argument("--priority", help="must (something real stops or breaks "
                                       "if it is ignored) or later (worth "
                                       "doing, nothing depends on it)")
+    p.add_argument("--needs", help="what the next run needs that only some "
+                                   "machines have: studio, or none (empty "
+                                   "clears it: not judged yet)")
 
 
 def _add_ticket(p) -> None:

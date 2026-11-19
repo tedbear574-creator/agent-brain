@@ -1297,6 +1297,28 @@ def test_priority_set_changed_cleared_and_checked(tmp_path, monkeypatch):
         run("edit", "--root", root, "--ticket", "1", "--priority", "urgent")
 
 
+def test_needs_none_is_kept_apart_from_unjudged(tmp_path, monkeypatch):
+    # The pipeline treats an unjudged ticket as needing Studio, so `none`
+    # must survive as its own value, and a typo must not pass as a need.
+    as_writer(monkeypatch, "tod")
+    root = str(tmp_path / "b")
+    run("init", "--root", root, "--prefix", "T", "--name", "T")
+    run("open", "--root", root, "a")
+
+    def only(r):
+        return next(iter(tickets.board_state(r).values()))
+
+    assert only(root)["needs"] == ""
+    run("edit", "--root", root, "--ticket", "1", "--needs", "none")
+    assert only(root)["needs"] == "none"
+    run("edit", "--root", root, "--ticket", "1", "--needs", " Studio ")
+    assert only(root)["needs"] == "studio"
+    run("edit", "--root", root, "--ticket", "1", "--needs", "")
+    assert only(root)["needs"] == ""
+    with pytest.raises(SystemExit):
+        run("edit", "--root", root, "--ticket", "1", "--needs", "gpu")
+
+
 def test_stage_set_moved_cleared_and_checked(tmp_path, monkeypatch):
     as_writer(monkeypatch, "tod")
     root = str(tmp_path / "b")
