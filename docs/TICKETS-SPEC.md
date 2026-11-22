@@ -146,7 +146,7 @@ semantics. Gate: `python -m pytest tests/test_tickets.py -q`.
 
 `priority` says how much a ticket matters if it sits: `must` (something real stops or breaks if it is ignored), `later` (worth doing, nothing depends on it), or empty (not sorted yet; readers treat it as `must`, so nothing is hidden by accident). An edit with an empty value clears it.
 
-`needs` says what the ticket's next run needs that only some machines have: `studio` (Roblox Studio, so the run cannot go to a machine without it), comma-separated when there are several, `none` (judged: it needs none of them), or empty (not judged yet; the Roblox pipeline treats it as `studio`). Anything else is refused. An edit with an empty value clears it.
+`needs` says what the ticket's next run needs that only some machines have: `studio` (Roblox Studio, so the run cannot go to a machine without it), `tod` (the work is done with Tod in an interactive session: no run is launched on it, and the session clears it when it hands the ticket back), comma-separated when there are several, `none` (judged: it needs none of them), or empty (not judged yet; the Roblox pipeline treats it as `studio`). Anything else is refused. An edit with an empty value clears it.
 
 ## Title and notes
 

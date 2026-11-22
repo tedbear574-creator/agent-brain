@@ -171,9 +171,10 @@ KINDS = ("map", "research", "grilling", "prototype", "task")
 # enter at any stage and skip stages; `pick` and `play` are the two where the
 # work waits on the person the board belongs to, not on a session.
 STAGES = ("design", "prototype", "pick", "build", "check", "play")
-# What a ticket's next run needs that only some machines have. `none` says it
+# What a ticket's next run needs that only some machines have (`studio`), or Tod with it in an interactive
+# session (`tod`: no run is launched; it is his to start). `none` says it
 # was judged and needs none of them; empty means nobody has said yet.
-NEEDS = ("studio",)
+NEEDS = ("studio", "tod")
 HUMAN_STAGES = ("pick", "play")
 # A title is a name, read in lists; everything else goes in the notes.
 TITLE_MAX = 70
