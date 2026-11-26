@@ -1,7 +1,8 @@
 """Small helpers for tickets.py: filename-safe writer ids, the home writer name,
-and an append that rides out file contention."""
+and an append held under a lock, so concurrent writers never lose a line."""
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import time
@@ -30,15 +31,40 @@ def home_writer_name() -> str:
     return parts[-1] if parts else ""
 
 
-def append_with_retry(path: str, line: str, attempts: int = 5) -> None:
-    """Append one line to a file, riding out transient contention.
+@contextlib.contextmanager
+def _held(path: str):
+    """Hold an OS lock while the block runs (msvcrt on Windows, flock elsewhere): appends from several processes to
+    one file are not atomic on Windows, so two at once can lose or tear a line. The lock is one file beside the
+    folder (``events/x.jsonl`` -> ``events.lock``), so nothing extra lands among the folder's files."""
+    with open(os.path.dirname(os.path.abspath(path)) + ".lock", "a+b") as fh:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            while True:
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)   # retries ~10 s itself, then raises
+                    break
+                except OSError:
+                    continue
+            try:
+                yield
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
-    Opening in append mode is atomic per line; a brief retry rides out the rare
-    moment two local processes touch the same file at once.
-    """
+
+def append_with_retry(path: str, line: str, attempts: int = 5) -> None:
+    """Append one line to a file under its lock (:func:`_held`), riding out transient contention on open."""
     for attempt in range(attempts):
         try:
-            with open(path, "a", encoding="utf-8") as f:
+            with _held(path), open(path, "a", encoding="utf-8") as f:
                 f.write(line)
             return
         except OSError:
