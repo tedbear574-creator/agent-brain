@@ -9,8 +9,9 @@ python file.
 
 - **One file per writer, forever.** OneDrive conflict-copies corrupt
   multi-writer files; a single-writer file can only sync late, never fork.
-  Locally (git-managed roots) concurrent appends to one file are fine —
-  append mode + short retry.
+  Locally, several processes append to one writer's file, so each append
+  holds an OS lock (`events.lock` beside the events folder): plain append
+  mode is not atomic between processes on Windows and loses or tears lines.
 - **Writer id is derived, never manually set.** Basename of the user profile
   dir (`C:\Users\jsmith` → `jsmith`). `TICKETS_WRITER` env may override
   (agents), but nothing ever *requires* setting it.
