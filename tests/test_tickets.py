@@ -1354,3 +1354,18 @@ def test_a_long_title_is_refused_and_an_old_long_one_still_edits(
     assert tickets.board_state(root)["aaaaaaaa"]["owner"] == "tod"
     with pytest.raises(SystemExit):
         run("edit", "--root", root, "--ticket", "1", "--title", long)
+
+
+def test_concurrent_appends_from_several_processes_lose_no_line(tmp_path):
+    """HUB-48: plain append mode is not atomic between processes on Windows; lines were lost and torn."""
+    import subprocess
+    import sys
+    from pathlib import Path
+    here = Path(__file__).resolve().parent.parent
+    target = tmp_path / "w.jsonl"
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); from _common import append_with_retry\n"
+            "for i in range(100): append_with_retry(sys.argv[2], 'x' * 300 + str(i) + chr(10))")
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(here), str(target)]) for _ in range(4)]
+    assert all(p.wait() == 0 for p in procs)
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 400 and all(len(ln) >= 301 for ln in lines)
