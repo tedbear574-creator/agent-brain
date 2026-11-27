@@ -91,8 +91,9 @@ and waiting on nothing.
 
 ## Fold (deterministic — the board is computed, never stored)
 
-Replay all events from all writer files, ordered by `(ts, writer,
-line-number)`. Display number: honor `propose_n` (creator writes the next
+Replay all events from all writer files, ordered by `(ts, opens first,
+writer, line-number)`: an edit written in the same second as its ticket's
+open, by another writer, replays after the open. Display number: honor `propose_n` (creator writes the next
 free number in the ticket's effective-prefix space); if two tickets proposed
 the same number **under the same prefix**, the later one (by replay order)
 keeps the number **with a letter suffix** (`5` and `5b`) — nothing is ever

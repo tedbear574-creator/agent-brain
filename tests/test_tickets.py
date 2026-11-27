@@ -1369,3 +1369,14 @@ def test_concurrent_appends_from_several_processes_lose_no_line(tmp_path):
     assert all(p.wait() == 0 for p in procs)
     lines = target.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 400 and all(len(ln) >= 301 for ln in lines)
+
+
+def test_an_edit_in_the_same_second_as_its_open_by_another_writer_is_kept(tmp_path, monkeypatch):
+    """2026-11-26: the router set needs=pc on a ticket opened that second by tod; "router" sorted before "tod",
+    the edit replayed before the open and was lost, and the job went to the cloud."""
+    root = make_board(tmp_path, monkeypatch)
+    write_raw(root, "tod", [{"ts": "2026-11-26T21:06:16", "writer": "tod", "verb": "open",
+                             "id": "aaaaaa", "title": "A", "propose_n": 1}])
+    write_raw(root, "router", [{"ts": "2026-11-26T21:06:16", "writer": "router", "verb": "edit",
+                                "id": "aaaaaa", "needs": "pc"}])
+    assert tickets.board_state(root)["aaaaaa"]["needs"] == "pc"

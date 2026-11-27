@@ -145,9 +145,11 @@ def _iter_raw_events(root: str):
 
 def sorted_events(root: str) -> list[dict]:
     """Every action, in the one fixed order the board is built from:
-    by time, then by person's name, then by position in that person's file."""
+    by time, opens first within a second (an edit written the same second as
+    its ticket's open, by another writer, must not replay before it), then by
+    person's name, then by position in that person's file."""
     rows = list(_iter_raw_events(root))
-    rows.sort(key=lambda r: (r[0], r[1], r[2]))
+    rows.sort(key=lambda r: (r[0], r[3].get("verb") != "open", r[1], r[2]))
     return [r[3] for r in rows]
 
 
