@@ -164,21 +164,20 @@ STATUS_BLOCKED = "blocked"
 STATUS_CLOSED = "closed"
 
 # What kind of ticket it is. Plain work has no kind. A "map" charts one big
-# effort (its notes hold the destination and the fog); the rest are the
-# decision tickets on a map: research (an agent looks it up), grilling (talked
-# through with the person who decides), prototype (a rough thing to react to),
-# task (work that must happen before a decision can be made).
-KINDS = ("map", "research", "grilling", "prototype", "task")
+# effort (its notes hold the destination and the fog); a "grilling" is a
+# decision talked through with the person who decides.
+KINDS = ("map", "grilling")
 # Where a piece of work stands on its way to shipped, in order. A ticket may
-# enter at any stage and skip stages; `pick` and `play` are the two where the
-# work waits on the person the board belongs to, not on a session.
-STAGES = ("design", "prototype", "pick", "build", "check", "play")
+# enter at any stage and skip stages; `play` is the one where the work waits
+# on the person the board belongs to, not on a session.
+STAGES = ("build", "check", "play")
 # What a ticket's next run needs that only some machines have (`studio`; `pc`: this PC's own tools, such
 # as ccdesk gemini, another local repo's tools or the review pages, but not Studio), or Tod with it in an
 # interactive session (`tod`: no run is launched; it is his to start). `none` says it
 # was judged and needs none of them; empty means nobody has said yet.
 NEEDS = ("studio", "pc", "tod")
-HUMAN_STAGES = ("pick", "play")
+# Read only by live ccdesk until CCDESK-411 merges there; deleted then (HUB-49).
+HUMAN_STAGES = ("play",)
 # A title is a name, read in lists; everything else goes in the notes.
 TITLE_MAX = 70
 
@@ -2225,17 +2224,15 @@ def _add_root(p) -> None:
 
 
 def _add_map_args(p) -> None:
-    p.add_argument("--kind", help="map, research, grilling, prototype or "
-                                  "task (empty for plain work)")
+    p.add_argument("--kind", help="map or grilling (empty for plain work)")
     p.add_argument("--map", help="the map this ticket sits on (empty to "
                                  "take it off)")
     p.add_argument("--after", help="tickets this one waits on, comma-"
                                    "separated; replaces the list (empty "
                                    "clears it)")
-    p.add_argument("--stage", help="where the work stands: design, "
-                                   "prototype, pick, build, check or play "
-                                   "(pick and play wait on the board's "
-                                   "owner; empty clears it)")
+    p.add_argument("--stage", help="where the work stands: build, check or "
+                                   "play (play waits on the board's owner; "
+                                   "empty clears it)")
     p.add_argument("--priority", help="must (something real stops or breaks "
                                       "if it is ignored) or later (worth "
                                       "doing, nothing depends on it)")

@@ -1323,14 +1323,14 @@ def test_stage_set_moved_cleared_and_checked(tmp_path, monkeypatch):
     as_writer(monkeypatch, "tod")
     root = str(tmp_path / "b")
     run("init", "--root", root, "--prefix", "T", "--name", "T")
-    run("open", "--root", root, "--stage", "design", "a")
+    run("open", "--root", root, "--stage", "build", "a")
 
     def only(r):
         return next(iter(tickets.board_state(r).values()))
 
-    assert only(root)["stage"] == "design"
-    run("edit", "--root", root, "--ticket", "1", "--stage", "pick")
-    assert only(root)["stage"] == "pick"
+    assert only(root)["stage"] == "build"
+    run("edit", "--root", root, "--ticket", "1", "--stage", "play")
+    assert only(root)["stage"] == "play"
     run("edit", "--root", root, "--ticket", "1", "--stage", "")
     assert only(root)["stage"] == ""
     with pytest.raises(SystemExit):

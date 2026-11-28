@@ -77,9 +77,9 @@ everything else), `comment` (text).
 ## Maps and waits
 
 For efforts too big for one session (the `wayfinder` skill). `kind` is empty
-(plain work) or one of `map`, `research`, `grilling`, `prototype`, `task`. A
-`map` ticket charts one effort: its notes hold the destination, the fog (not
-yet specified) and what is out of scope. `map` on another ticket is the map's
+(plain work), `map` or `grilling` (a decision talked through with the person
+who decides). A `map` ticket charts one effort: its notes hold the
+destination, the fog (not yet specified) and what is out of scope. `map` on another ticket is the map's
 permanent id (the map must have kind `map`; a map with tickets on it can't
 change kind). `after` is a list of permanent ids the ticket waits on; a
 ticket can't wait on itself and a loop of waits is refused at write time.
@@ -156,4 +156,4 @@ semantics. Gate: `python -m pytest tests/test_tickets.py -q`.
 
 ## Stage
 
-`stage` says where a piece of work stands on its way to shipped: `design`, `prototype`, `pick`, `build`, `check`, `play`, in that order, or empty (the ticket is not on the pipeline). A ticket may enter at any stage and skip stages (a bug starts at `build`); whoever finishes a stage moves it with `edit --stage`. `pick` (choose between options that were made) and `play` (try the built thing) are the two stages that wait on the board's owner, not on a session: a reader gathers every ticket at one of them into a single ask per project. `close` ends the pipeline; the stage a closed ticket last held stays on it. `map -t M` shows a ticket's stage in place of its kind.
+`stage` says where a piece of work stands on its way to shipped: `build`, `check`, `play`, in that order, or empty (the ticket is not on the pipeline). A ticket may enter at any stage and skip stages (a bug starts at `build`); whoever finishes a stage moves it with `edit --stage`. `play` (try the built thing) is the stage that waits on the board's owner, not on a session: a reader gathers every ticket at it into a single ask per project. `close` ends the pipeline; the stage a closed ticket last held stays on it. `map -t M` shows a ticket's stage in place of its kind.
